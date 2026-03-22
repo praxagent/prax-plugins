@@ -20,7 +20,7 @@ Or by URL with path:
 
 > "Import this plugin: https://github.com/praxagent/prax-plugins/tree/main/pdf2presentation"
 
-Prax clones the repo and loads only the plugin you specified.
+Prax clones the repo as a git submodule and loads only the plugin you specified.
 
 ### Import all plugins at once
 
@@ -33,6 +33,27 @@ Prax clones the repo and loads every plugin subfolder that has a `plugin.py`.
 ```bash
 cd /path/to/prax/workspaces/<your-user-id>/plugins/shared/
 git submodule add https://github.com/praxagent/prax-plugins.git prax-plugins
+```
+
+### How it works
+
+When you import a plugin repo, Prax:
+
+1. **Clones** the repo as a git submodule into your workspace at `plugins/shared/<repo-name>/`
+2. **Scans** all Python files for security risks (subprocess calls, eval, network access, obfuscated code, etc.)
+3. **If warnings are found** — Prax shows them to you and waits for explicit confirmation before activating
+4. **If clean** — the plugin tools are loaded immediately
+
+When you import a specific subfolder from a multi-plugin repo, Prax writes a filter file (`.reponame_plugin_filter`) next to the submodule so only that subfolder's `plugin.py` is activated. The filter lives outside the submodule to avoid modifying its git working tree.
+
+### Plugin structure
+
+Each plugin subfolder should contain:
+
+```
+my-plugin/
+├── plugin.py    # Required — tools + register()
+└── README.md    # Recommended — docs for users
 ```
 
 ---
