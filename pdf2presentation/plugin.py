@@ -12,10 +12,14 @@ Pipeline:
 
 System requirements: pdflatex, pdftoppm (poppler-utils), ffmpeg
 TTS providers: OpenAI (default) or ElevenLabs — see README for .env config.
+
+In Docker-compose deployments, system commands are automatically routed to
+the always-on sandbox container via ``prax.utils.shell``.  No user
+intervention needed — the sandbox has all required packages pre-installed.
 """
 from __future__ import annotations
 
-PLUGIN_VERSION = "1"
+PLUGIN_VERSION = "2"
 PLUGIN_DESCRIPTION = "Convert a PDF into a narrated video presentation"
 
 import json
@@ -28,6 +32,28 @@ import time
 from pathlib import Path
 
 from langchain_core.tools import tool
+
+# Sandbox-aware command execution.  When running inside Docker-compose,
+# commands are routed to the sandbox container automatically.  Falls back
+# to raw subprocess for standalone / local use.
+try:
+    from prax.utils.shell import run_command, which as _which_cmd, shared_tempdir
+except ImportError:
+    # Standalone fallback — no Prax framework available.
+    def run_command(cmd, **kw):  # type: ignore[misc]
+        kw.setdefault("capture_output", True)
+        kw.setdefault("text", True)
+        return subprocess.run(cmd, **kw)
+
+    def _which_cmd(name):  # type: ignore[misc]
+        try:
+            subprocess.run(["which", name], capture_output=True, check=True, timeout=5)
+            return True
+        except Exception:
+            return False
+
+    def shared_tempdir(prefix="prax_"):  # type: ignore[misc]
+        return tempfile.mkdtemp(prefix=prefix)
 
 logger = logging.getLogger(__name__)
 
@@ -57,27 +83,19 @@ def _get_tts_config() -> dict:
 
 
 def _check_system_deps(need_ffmpeg: bool = True) -> list[str]:
-    """Check which system dependencies are missing."""
+    """Check which system dependencies are missing.
+
+    In Docker mode this checks the sandbox container, not the app container.
+    """
     missing = []
     for cmd in ["pdflatex", "pdftoppm"]:
-        if not _which(cmd):
+        if not _which_cmd(cmd):
             missing.append(cmd)
     if need_ffmpeg:
         for cmd in ["ffmpeg", "ffprobe"]:
-            if not _which(cmd):
+            if not _which_cmd(cmd):
                 missing.append(cmd)
     return missing
-
-
-def _which(cmd: str) -> bool:
-    """Check if a command is available on PATH."""
-    try:
-        subprocess.run(
-            ["which", cmd], capture_output=True, check=True, timeout=5,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
 
 
 # ======================================================================
@@ -104,9 +122,9 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
         pass
 
     # Fallback: pdftotext (poppler-utils).
-    result = subprocess.run(
+    result = run_command(
         ["pdftotext", "-layout", pdf_path, "-"],
-        capture_output=True, text=True, timeout=60,
+        timeout=60,
     )
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout
@@ -227,14 +245,14 @@ def _compile_latex(latex_source: str, work_dir: str) -> str:
 
     # Run pdflatex twice (for TOC / frame numbers).
     for pass_num in range(2):
-        result = subprocess.run(
+        result = run_command(
             [
                 "pdflatex",
                 "-interaction=nonstopmode",
                 "-output-directory", work_dir,
                 tex_path,
             ],
-            capture_output=True, text=True, timeout=60, cwd=work_dir,
+            timeout=60, cwd=work_dir,
         )
         if result.returncode != 0 and pass_num == 1:
             logger.warning("pdflatex stderr: %s", result.stderr[:500])
@@ -258,9 +276,9 @@ def _extract_slide_images(pdf_path: str, work_dir: str) -> list[str]:
     Returns a sorted list of image file paths.
     """
     prefix = os.path.join(work_dir, "slide")
-    result = subprocess.run(
+    result = run_command(
         ["pdftoppm", "-png", "-r", "300", pdf_path, prefix],
-        capture_output=True, text=True, timeout=120,
+        timeout=120,
     )
     if result.returncode != 0:
         raise RuntimeError(f"pdftoppm failed: {result.stderr[:300]}")
@@ -338,14 +356,14 @@ def _generate_audio(text: str, output_path: str) -> None:
 
 def _get_audio_duration(audio_path: str) -> float:
     """Get the duration of an audio file in seconds."""
-    result = subprocess.run(
+    result = run_command(
         [
             "ffprobe", "-v", "quiet",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             audio_path,
         ],
-        capture_output=True, text=True, timeout=30,
+        timeout=30,
     )
     return float(result.stdout.strip())
 
@@ -356,7 +374,7 @@ def _create_slide_video(
     """Create a video segment: still slide image + audio narration."""
     duration = _get_audio_duration(audio_path) + 1.0  # 1s padding after speech
 
-    result = subprocess.run(
+    result = run_command(
         [
             "ffmpeg", "-y",
             "-loop", "1", "-i", image_path,
@@ -369,7 +387,7 @@ def _create_slide_video(
                    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=white",
             output_path,
         ],
-        capture_output=True, text=True, timeout=120,
+        timeout=120,
     )
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg slide video failed: {result.stderr[:300]}")
@@ -382,7 +400,7 @@ def _concatenate_videos(video_paths: list[str], output_path: str) -> None:
         for vp in video_paths:
             f.write(f"file '{vp}'\n")
 
-    result = subprocess.run(
+    result = run_command(
         [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -390,7 +408,7 @@ def _concatenate_videos(video_paths: list[str], output_path: str) -> None:
             "-c", "copy",
             output_path,
         ],
-        capture_output=True, text=True, timeout=300,
+        timeout=300,
     )
     os.unlink(concat_file)
     if result.returncode != 0:
@@ -437,7 +455,7 @@ def pdf_to_presentation(
         key_var = "ELEVENLABS_API_KEY" if tts_cfg["provider"] == "elevenlabs" else "OPENAI_KEY"
         return f"No TTS API key. Set {key_var} in .env (using provider: {tts_cfg['provider']})."
 
-    work_dir = tempfile.mkdtemp(prefix="prax_pres_")
+    work_dir = shared_tempdir(prefix="prax_pres_")
     try:
         return _run_pipeline(pdf_source, topic, style, work_dir)
     except Exception as e:
@@ -475,7 +493,7 @@ def pdf_to_slides(
             f"  Ubuntu: apt install texlive-latex-base poppler-utils"
         )
 
-    work_dir = tempfile.mkdtemp(prefix="prax_slides_")
+    work_dir = shared_tempdir(prefix="prax_slides_")
     try:
         return _run_slides_only(pdf_source, topic, style, work_dir)
     except Exception as e:
