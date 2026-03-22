@@ -1,0 +1,219 @@
+# prax-plugin-pdf2presentation
+
+A [Prax](https://github.com/praxagent/prax) plugin that converts PDF documents into narrated video presentations.
+
+**Pipeline:** PDF → Markdown → Beamer LaTeX + speaker notes (LLM) → slide images → TTS audio → video (ffmpeg)
+
+## Tools provided
+
+| Tool | Description |
+|------|-------------|
+| `pdf_to_presentation` | Full pipeline: PDF → narrated video (.mp4) |
+| `pdf_to_slides` | Lighter: PDF → Beamer slide deck + speaker notes (no video) |
+
+## Requirements
+
+### System dependencies
+
+```bash
+# macOS
+brew install basictex poppler ffmpeg
+
+# Ubuntu / Debian
+sudo apt install texlive-latex-base texlive-latex-recommended \
+    texlive-fonts-recommended poppler-utils ffmpeg
+
+# Arch
+sudo pacman -S texlive-basic poppler ffmpeg
+```
+
+### API keys (in Prax's `.env`)
+
+The plugin uses your existing Prax API keys — no extra configuration needed for the default setup.
+
+| Key | Required for |
+|-----|-------------|
+| `OPENAI_KEY` | LLM (slide generation) + TTS (default) |
+| `ELEVENLABS_API_KEY` | TTS (if you prefer ElevenLabs) |
+
+### Optional TTS configuration
+
+Add to Prax's `.env` to customize the TTS voice:
+
+```bash
+# TTS provider: "openai" (default) or "elevenlabs"
+PRESENTATION_TTS_PROVIDER=openai
+
+# Voice name — depends on provider
+# OpenAI voices: alloy, echo, fable, onyx, nova, shimmer
+# ElevenLabs: use any voice name from your account
+PRESENTATION_TTS_VOICE=nova
+```
+
+## Installation
+
+### Option 1: Import via Prax (recommended)
+
+Tell Prax:
+
+> "Import this plugin: https://github.com/your-username/prax-plugin-pdf2presentation"
+
+Prax will run `plugin_import` to add it as a git submodule in your workspace.
+
+### Option 2: Manual install
+
+Clone into Prax's plugin directory:
+
+```bash
+cd /path/to/prax/workspaces/<your-user-id>/plugins/shared/
+git submodule add https://github.com/your-username/prax-plugin-pdf2presentation.git pdf2presentation
+```
+
+Or for development, into the built-in custom plugins:
+
+```bash
+cd /path/to/prax/prax/plugins/tools/custom/
+git clone https://github.com/your-username/prax-plugin-pdf2presentation.git pdf2presentation
+```
+
+## Usage
+
+Once installed, just talk to Prax:
+
+> "Turn this paper into a presentation: https://arxiv.org/abs/1706.03762"
+
+> "Make a video presentation from paper.pdf in my workspace"
+
+> "Create slides from this PDF — business style, no video"
+
+### What Prax does
+
+1. **Extracts text** from the PDF (using opendataloader-pdf, pymupdf, or pdftotext)
+2. **Generates Beamer LaTeX slides** via your configured LLM, with natural speaker notes
+3. **Compiles** the LaTeX to a PDF slide deck
+4. **Converts** each slide to an image (pdftoppm, 300 DPI)
+5. **Narrates** each slide with TTS (OpenAI or ElevenLabs)
+6. **Assembles** each slide image + audio into a video segment (ffmpeg)
+7. **Concatenates** all segments into a final .mp4
+8. **Saves** the video, LaTeX source, and speaker notes to your workspace
+
+### Output files
+
+| File | Description |
+|------|-------------|
+| `<title>.mp4` | Narrated video presentation |
+| `<title>_slides.tex` | Beamer LaTeX source |
+| `<title>_slides.pdf` | Compiled slide deck |
+| `<title>_notes.md` | Speaker notes (markdown) |
+
+## How it works (architecture)
+
+```
+PDF file
+  │
+  ├─ opendataloader-pdf / pymupdf / pdftotext
+  ▼
+Markdown text
+  │
+  ├─ LLM (GPT-4o / Claude / etc.)
+  ▼
+┌──────────────┐   ┌───────────────────┐
+│ Beamer LaTeX │   │ Speaker notes     │
+│ (.tex)       │   │ (JSON per slide)  │
+└──────┬───────┘   └────────┬──────────┘
+       │                    │
+  pdflatex                  │
+       │                    │
+       ▼                    ▼
+  Slide PDF          TTS API (OpenAI/EL)
+       │                    │
+  pdftoppm                  │
+       │                    │
+       ▼                    ▼
+  Slide PNGs          Audio MP3s
+       │                    │
+       └───────┬────────────┘
+               │
+           ffmpeg (per slide: image + audio → video)
+               │
+           ffmpeg (concat all slide videos)
+               │
+               ▼
+        Final .mp4 presentation
+```
+
+## Creating your own Prax plugin
+
+This repo is a reference example. To create your own plugin:
+
+### 1. Create a repo with `plugin.py`
+
+Every Prax plugin needs a `plugin.py` with three things:
+
+```python
+PLUGIN_VERSION = "1"
+PLUGIN_DESCRIPTION = "What this plugin does"
+
+from langchain_core.tools import tool
+
+@tool
+def my_tool(arg: str) -> str:
+    """Description shown to the LLM agent."""
+    return "result"
+
+def register():
+    """Return the tools this plugin provides."""
+    return [my_tool]
+```
+
+### 2. Push to GitHub
+
+```bash
+git init
+git add .
+git commit -m "Initial plugin"
+gh repo create my-prax-plugin --public --push
+```
+
+### 3. Import into Prax
+
+Tell Prax: `"Import this plugin: https://github.com/you/my-prax-plugin"`
+
+Or manually: `plugin_import("https://github.com/you/my-prax-plugin.git")`
+
+### Plugin conventions
+
+- **`PLUGIN_VERSION`** — string, increment when you update
+- **`PLUGIN_DESCRIPTION`** — one-line summary for the catalog
+- **`register()`** — must return a list of `@tool` decorated functions
+- **Deferred imports** — import heavy dependencies inside your tool functions, not at module level
+- **Error messages** — return user-friendly strings, don't raise exceptions from tools
+- **System deps** — check for them at runtime and return install instructions if missing
+
+### Accessing Prax services
+
+Plugins run inside Prax, so you can import its services:
+
+```python
+# PDF extraction
+from prax.services.pdf_service import process_pdf_url
+
+# Current user
+from prax.agent.user_context import current_user_id
+uid = current_user_id.get()
+
+# Workspace files
+from prax.services.workspace_service import save_file, read_file
+
+# LLM
+from prax.agent.llm_factory import build_llm
+llm = build_llm()
+
+# Settings
+from prax.settings import settings
+api_key = settings.openai_key
+```
+
+## License
+
+MIT
