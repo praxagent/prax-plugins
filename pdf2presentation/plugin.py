@@ -705,6 +705,18 @@ def _run_pipeline(
     except Exception:
         logger.debug("Could not copy video to workspace", exc_info=True)
 
+    # Recommend share link for videos (Discord has 8MB upload limit).
+    if size_mb > 7:
+        delivery_hint = (
+            f"Use `workspace_share_file('active/{safe_title}.mp4')` to get a shareable link "
+            f"(video is {size_mb:.1f} MB — too large for direct Discord upload)."
+        )
+    else:
+        delivery_hint = (
+            f"Use `workspace_send_file('{safe_title}.mp4')` to upload directly, "
+            f"or `workspace_share_file('active/{safe_title}.mp4')` for a shareable link."
+        )
+
     return (
         f"Presentation video created: **{title}**\n\n"
         f"- {num_slides} slides, {size_mb:.1f} MB\n"
@@ -713,7 +725,7 @@ def _run_pipeline(
         f"- `{safe_title}.mp4` — narrated video presentation\n"
         f"- `{safe_title}_slides.tex` — LaTeX source\n"
         f"- `{safe_title}_notes.md` — speaker notes\n\n"
-        f"Use `workspace_send_file('{safe_title}.mp4')` to deliver the video."
+        f"{delivery_hint}"
     )
 
 
