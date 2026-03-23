@@ -19,7 +19,7 @@ intervention needed — the sandbox has all required packages pre-installed.
 """
 from __future__ import annotations
 
-PLUGIN_VERSION = "2"
+PLUGIN_VERSION = "3"
 PLUGIN_DESCRIPTION = "Convert a PDF into a narrated video presentation"
 
 import json
@@ -37,7 +37,7 @@ from langchain_core.tools import tool
 # commands are routed to the sandbox container automatically.  Falls back
 # to raw subprocess for standalone / local use.
 try:
-    from prax.utils.shell import run_command, which as _which_cmd, shared_tempdir
+    from prax.utils.shell import run_command, which as _which_cmd, shared_tempdir, to_sandbox_path
 except ImportError:
     # Standalone fallback — no Prax framework available.
     def run_command(cmd, **kw):  # type: ignore[misc]
@@ -54,6 +54,9 @@ except ImportError:
 
     def shared_tempdir(prefix="prax_"):  # type: ignore[misc]
         return tempfile.mkdtemp(prefix=prefix)
+
+    def to_sandbox_path(path):  # type: ignore[misc]
+        return path
 
 logger = logging.getLogger(__name__)
 
@@ -396,9 +399,12 @@ def _create_slide_video(
 def _concatenate_videos(video_paths: list[str], output_path: str) -> None:
     """Concatenate slide videos into one final presentation video."""
     concat_file = output_path + ".concat.txt"
+    # Translate paths for the sandbox — ffmpeg reads these from the concat
+    # file, so they must use sandbox-side paths, not app-container paths.
     with open(concat_file, "w") as f:
         for vp in video_paths:
-            f.write(f"file '{vp}'\n")
+            sandbox_vp = to_sandbox_path(vp) or vp
+            f.write(f"file '{sandbox_vp}'\n")
 
     result = run_command(
         [
