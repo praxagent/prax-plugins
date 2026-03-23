@@ -357,26 +357,15 @@ def _generate_audio(text: str, output_path: str) -> None:
 # Step 6: Video assembly with ffmpeg
 # ======================================================================
 
-def _get_audio_duration(audio_path: str) -> float:
-    """Get the duration of an audio file in seconds."""
-    result = run_command(
-        [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            audio_path,
-        ],
-        timeout=30,
-    )
-    return float(result.stdout.strip())
-
-
 def _create_slide_video(
     image_path: str, audio_path: str, output_path: str
 ) -> None:
     """Create a video segment: still slide image + audio narration."""
-    duration = _get_audio_duration(audio_path) + 1.0  # 1s padding after speech
-
+    # Use -shortest so the video duration is driven by the audio stream,
+    # avoiding A/V drift from manual duration calculation + AAC encoder delay.
+    # -af apad=pad_dur=1 adds 1s silence after speech for a natural pause
+    # between slides.  -fflags +shortest -max_interleave_delta 100M prevents
+    # ffmpeg from buffering the infinite image stream past the audio end.
     result = run_command(
         [
             "ffmpeg", "-y",
@@ -385,7 +374,10 @@ def _create_slide_video(
             "-c:v", "libx264", "-tune", "stillimage",
             "-c:a", "aac", "-b:a", "192k",
             "-pix_fmt", "yuv420p",
-            "-t", str(duration),
+            "-af", "apad=pad_dur=1",
+            "-shortest",
+            "-fflags", "+shortest",
+            "-max_interleave_delta", "100M",
             "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,"
                    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=white",
             output_path,
