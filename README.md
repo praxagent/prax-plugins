@@ -40,9 +40,24 @@ git submodule add https://github.com/praxagent/prax-plugins.git prax-plugins
 When you import a plugin repo, Prax:
 
 1. **Clones** the repo as a git submodule into your workspace at `plugins/shared/<repo-name>/`
-2. **Scans** all Python files for security risks (subprocess calls, eval, network access, obfuscated code, etc.)
-3. **If warnings are found** — Prax shows them to you and waits for explicit confirmation before activating
+2. **Scans** all Python files for security risks using both AST analysis and regex pattern matching (subprocess, eval, os.environ, socket, etc.)
+3. **If warnings are found** — Prax shows them to you, emits a `plugin_security_warn` audit event, and waits for explicit confirmation before activating
 4. **If clean** — the plugin tools are loaded immediately
+5. **Tags** the plugin with trust tier `imported` and emits a `plugin_import` audit event
+
+All plugin lifecycle events (import, activate, block, rollback, remove, security warnings) are recorded in the workspace trace log and searchable via `search_trace`.
+
+#### Trust tiers
+
+Prax tags every plugin with a trust tier based on its origin:
+
+| Tier | Meaning |
+|------|---------|
+| `builtin` | Ships with Prax |
+| `workspace` | User-created in their workspace |
+| `imported` | Cloned from an external repo (like this one) |
+
+Imported plugins default to the least-trusted tier. Trust tiers are visible in `plugin_list` and `plugin_status`.
 
 When you import a specific subfolder from a multi-plugin repo, Prax writes a filter file (`.reponame_plugin_filter`) next to the submodule so only that subfolder's `plugin.py` is activated. The filter lives outside the submodule to avoid modifying its git working tree.
 
