@@ -211,6 +211,23 @@ Tell Prax: `"Import this plugin: https://github.com/you/my-plugin"`
 - **Error messages** — return user-friendly strings, don't raise exceptions from tools
 - **System deps** — check for them at runtime and return install instructions if missing
 
+### Security restrictions
+
+Prax applies multiple security layers when importing plugins. Your plugin will be **rejected** if it triggers any of these:
+
+| Restriction | Details |
+|-------------|---------|
+| **No `subprocess`, `os.system`, `os.popen`** | Detected by AST analysis. Use Prax's sandbox tools instead. |
+| **No `eval`, `exec`, `compile`, `__import__`** | Dynamic code execution is blocked. |
+| **No `os.environ` access** | Plugins cannot read environment variables (API keys, secrets). Use `prax.settings` for configuration. |
+| **No raw `socket` usage** | Use `requests` (flagged but shown to user) or Prax's `fetch_url_content` tool. |
+| **No built-in tool name collisions** | Your tools cannot share names with Prax's ~100+ built-in tools. Attempting to register `browser_read_page` or `get_current_datetime` will be rejected. |
+| **Sandbox test must pass** | Before activation, your plugin is imported in an isolated subprocess with a stripped environment (no API keys) and a 30-second timeout. |
+
+If security warnings are found, Prax shows them to the user and requires explicit confirmation before activating.
+
+**Risk classification:** Plugin tools are automatically classified as MEDIUM risk (external reads, state changes). If your tool performs side-effectful external actions (sending messages, HTTP POST, file deletion), consider using `@risk_tool(risk=RiskLevel.HIGH)` from `prax.agent.action_policy` instead of `@tool` — this adds a user confirmation gate.
+
 ### Accessing Prax services
 
 Plugins run inside Prax, so you can import its services:
@@ -220,7 +237,7 @@ from prax.services.pdf_service import process_pdf_url   # PDF extraction
 from prax.agent.user_context import current_user_id      # Current user
 from prax.services.workspace_service import save_file     # Workspace files
 from prax.agent.llm_factory import build_llm              # LLM
-from prax.settings import settings                        # Settings
+from prax.settings import settings                        # Settings (NOT os.environ)
 ```
 
 ## License
