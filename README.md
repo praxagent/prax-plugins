@@ -7,6 +7,7 @@ Example plugin collection for [Prax](https://github.com/praxagent/prax). Each su
 | Plugin | Description |
 |--------|-------------|
 | [`pdf2presentation`](pdf2presentation/) | PDF → narrated video presentation (Beamer + TTS + ffmpeg) |
+| [`flight_search`](flight_search/) | Search for the cheapest flights between airports (Amadeus API) |
 
 ## Installing plugins
 
@@ -184,6 +185,42 @@ Markdown text
                ▼
         Final .mp4 presentation
 ```
+
+---
+
+## flight_search
+
+Search for the cheapest flights between airports using the Amadeus Flight Offers Search API (free test tier: 2,000 calls/month).
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `flight_search` | Search for cheapest flights between two airports (one-way or round-trip) |
+| `airport_lookup` | Look up airport IATA codes by city name or partial code |
+
+### Requirements
+
+**API keys** (in Prax's `.env`):
+
+| Key | Required for |
+|-----|-------------|
+| `AMADEUS_API_KEY` | Flight search API authentication |
+| `AMADEUS_API_SECRET` | Flight search API authentication |
+
+Sign up free at https://developers.amadeus.com/
+
+### Usage
+
+Once installed, just talk to Prax:
+
+> "Find the cheapest flights from JFK to Paris on March 15"
+
+> "Round-trip flights LAX to Tokyo, April 1–10, business class"
+
+> "What's the airport code for Munich?"
+
+Prax will use `airport_lookup` automatically when you say a city name instead of an IATA code, then pass the code to `flight_search`. Results are sorted by price (cheapest first) and include airline, times, duration, stops, and cabin class.
 
 ---
 
