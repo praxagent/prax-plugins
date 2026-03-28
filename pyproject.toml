@@ -1,0 +1,34 @@
+[project]
+name = "prax-plugins"
+version = "0.1.0"
+description = "Plugin collection for the Prax AI agent"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+
+dependencies = [
+    "langchain-core>=0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.9",
+    "requests>=2.31",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Plugin files must declare PLUGIN_VERSION before imports — E402 is by design.
+"*/plugin.py" = ["E402", "I001"]
+# Test files need sys.modules patching before imports.
+"tests/*.py" = ["E402", "I001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -5,3 +5,6 @@ __pycache__/
 *.mp3
 *.mp4
 *.wav
+.venv/
+.pytest_cache/
+uv.lock

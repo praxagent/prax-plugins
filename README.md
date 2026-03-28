@@ -1,13 +1,13 @@
 # prax-plugins
 
-Example plugin collection for [Prax](https://github.com/praxagent/prax). Each subfolder is a self-contained plugin with its own `plugin.py`.
+Plugin collection for [Prax](https://github.com/praxagent/prax). Each subfolder is a self-contained plugin with its own `plugin.py`.
 
 ## Available plugins
 
-| Plugin | Description |
-|--------|-------------|
-| [`pdf2presentation`](pdf2presentation/) | PDF → narrated video presentation (Beamer + TTS + ffmpeg) |
-| [`flight_search`](flight_search/) | Search for the cheapest flights between airports (Amadeus API) |
+| Plugin | Version | Description |
+|--------|---------|-------------|
+| [`pdf2presentation`](pdf2presentation/) | 4 | PDF → narrated video presentation (Beamer + TTS + ffmpeg) |
+| [`flight_search`](flight_search/) | 1 | Search for the cheapest flights between airports (Amadeus API) |
 
 ## Installing plugins
 
@@ -36,7 +36,43 @@ cd /path/to/prax/workspaces/<your-user-id>/plugins/shared/
 git submodule add https://github.com/praxagent/prax-plugins.git prax-plugins
 ```
 
-### How it works
+## Updating plugins
+
+Once installed, ask Prax to pull the latest version:
+
+> "Prax, please update the prax-plugins plugin"
+
+or more specifically:
+
+> "Update the pdf2presentation plugin"
+
+Prax runs `plugin_import_update("prax-plugins")` under the hood, which:
+
+1. Pulls the latest commit from this repo via `git submodule update --remote --merge`
+2. Re-scans the updated code for security warnings
+3. If clean, hot-reloads the plugin tools immediately — no restart needed
+4. If new security concerns are found, shows them and waits for your confirmation
+
+You can also check the current plugin version at any time:
+
+> "What version of the pdf2presentation plugin am I running?"
+
+Prax will call `plugin_status("prax-plugins")` and show the active version, health status, and failure count.
+
+### Checking for updates manually
+
+If you prefer manual control:
+
+```bash
+cd /path/to/prax/workspaces/<your-user-id>/plugins/shared/prax-plugins/
+git pull origin main
+```
+
+Then tell Prax to reload:
+
+> "Reload plugins"
+
+## How it works
 
 When you import a plugin repo, Prax:
 
@@ -48,7 +84,7 @@ When you import a plugin repo, Prax:
 
 All plugin lifecycle events (import, activate, block, rollback, remove, security warnings) are recorded in the workspace trace log and searchable via `search_trace`.
 
-#### Trust tiers
+### Trust tiers
 
 Prax tags every plugin with a trust tier based on its origin:
 
@@ -62,15 +98,13 @@ Imported plugins default to the least-trusted tier. Trust tiers are visible in `
 
 When you import a specific subfolder from a multi-plugin repo, Prax writes a filter file (`.reponame_plugin_filter`) next to the submodule so only that subfolder's `plugin.py` is activated. The filter lives outside the submodule to avoid modifying its git working tree.
 
-### Plugin structure
+### Plugin failure tracking
 
-Each plugin subfolder should contain:
+Prax monitors every plugin tool invocation. If a tool fails 3 times consecutively, the plugin is automatically rolled back to its previous version. You'll see a message like:
 
-```
-my-plugin/
-├── plugin.py    # Required — tools + register()
-└── README.md    # Recommended — docs for users
-```
+> "Plugin pdf2presentation auto-rolled back after 3 consecutive failures."
+
+You can check health status with `plugin_status` and manually roll back with `plugin_rollback` if needed.
 
 ---
 
@@ -84,6 +118,15 @@ PDF → Markdown → Beamer LaTeX + speaker notes (LLM) → slide images → TTS
 |------|-------------|
 | `pdf_to_presentation` | Full pipeline: PDF → narrated video (.mp4) |
 | `pdf_to_slides` | Lighter: PDF → Beamer slide deck + speaker notes (no video) |
+
+### Input validation
+
+The plugin validates that the source is actually a PDF before processing:
+
+- **Content-Type check** — HTTP responses with `text/html` or other non-PDF content types are rejected immediately with a clear error message
+- **Magic bytes check** — Downloaded files are verified to start with `%PDF`. HTML pages, JSON responses, and other non-PDF content are detected and rejected with guidance (e.g., "use fetch_url_content to extract text first")
+
+This prevents cryptic parser crashes when a URL returns an HTML page instead of a PDF.
 
 ### Requirements
 
@@ -153,7 +196,9 @@ Once installed, just talk to Prax:
 ### Architecture
 
 ```
-PDF file
+PDF file / URL
+  │
+  ├─ Content-Type + magic bytes validation
   │
   ├─ opendataloader-pdf / pymupdf / pdftotext
   ▼
@@ -291,6 +336,32 @@ from prax.services.workspace_service import save_file     # Workspace files
 from prax.agent.llm_factory import build_llm              # LLM
 from prax.settings import settings                        # Settings (NOT os.environ)
 ```
+
+---
+
+## Development
+
+### Setup
+
+```bash
+uv sync --extra dev
+```
+
+### Running tests
+
+```bash
+uv run pytest tests/ -x -q
+```
+
+### Linting
+
+```bash
+uv run ruff check .
+```
+
+### CI
+
+Pull requests run lint + tests automatically via GitHub Actions. Merges to `main` trigger [release-please](https://github.com/googleapis/release-please) for automated semantic versioning.
 
 ## License
 

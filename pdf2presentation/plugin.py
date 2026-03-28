@@ -19,7 +19,7 @@ intervention needed — the sandbox has all required packages pre-installed.
 """
 from __future__ import annotations
 
-PLUGIN_VERSION = "3"
+PLUGIN_VERSION = "4"
 PLUGIN_DESCRIPTION = "Convert a PDF into a narrated video presentation"
 
 import json
@@ -28,8 +28,6 @@ import os
 import re
 import subprocess
 import tempfile
-import time
-from pathlib import Path
 
 from langchain_core.tools import tool
 
@@ -139,19 +137,64 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
 
 
 def _download_pdf(url: str, dest_dir: str) -> str:
-    """Download a PDF from a URL. Returns the local file path."""
+    """Download a PDF from a URL. Returns the local file path.
+
+    Validates that the response is actually a PDF (by content-type header
+    and magic bytes) so that HTML pages, error pages, etc. are rejected
+    early with a clear error instead of crashing the PDF parser.
+    """
     # Prefer Prax's PDF service which handles arXiv URLs etc.
     try:
         from prax.services.pdf_service import download_pdf
-        return download_pdf(url)
-    except Exception:
+        path = download_pdf(url)
+        _validate_pdf(path, url)
+        return path
+    except ImportError:
         pass
 
-    # Fallback: urllib.
-    import urllib.request
+    # Fallback: requests (preferred) or urllib.
     dest = os.path.join(dest_dir, "input.pdf")
-    urllib.request.urlretrieve(url, dest)
+    try:
+        import requests as _req
+        resp = _req.get(url, timeout=60, allow_redirects=True)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "").lower()
+        if "html" in content_type:
+            raise ValueError(
+                f"URL returned HTML, not a PDF (Content-Type: {content_type}). "
+                f"If this is a web article, use fetch_url_content or web_summary_tool "
+                f"to extract the text first, then pass the text to pdf_to_slides."
+            )
+        with open(dest, "wb") as f:
+            f.write(resp.content)
+    except ImportError:
+        import urllib.request
+        urllib.request.urlretrieve(url, dest)
+
+    _validate_pdf(dest, url)
     return dest
+
+
+def _validate_pdf(path: str, source_url: str = "") -> None:
+    """Check that a file is actually a PDF by reading its magic bytes."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(16)
+    except OSError:
+        return  # Can't read — let downstream handle it.
+    if not header.startswith(b"%PDF"):
+        # Try to detect what we actually got.
+        if header.startswith((b"<!DOCTYPE", b"<html", b"<HTML", b"<head", b"<HEAD")):
+            hint = "The URL returned an HTML page, not a PDF."
+        elif header.startswith((b"{", b"[")):
+            hint = "The URL returned JSON, not a PDF."
+        else:
+            hint = f"File does not start with %PDF header (got: {header[:20]!r})."
+        url_note = f" URL: {source_url}" if source_url else ""
+        raise ValueError(
+            f"Not a valid PDF file. {hint}{url_note} "
+            f"If this is a web page, use fetch_url_content to extract its text first."
+        )
 
 
 # ======================================================================
