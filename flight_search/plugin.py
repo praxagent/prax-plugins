@@ -309,7 +309,7 @@ def flight_search(
         f"Date: {departure_date}"
         + (f" → {return_date}" if return_date else "")
         + f" | {adults} adult{'s' if adults > 1 else ''}"
-        + (f" | Nonstop only" if nonstop_only else "")
+        + (" | Nonstop only" if nonstop_only else "")
         + (f" | {cabin_class.replace('_', ' ').title()}" if cabin_class else "")
         + f"\n\nFound {len(offers)} option{'s' if len(offers) != 1 else ''} (cheapest first):\n"
     )
