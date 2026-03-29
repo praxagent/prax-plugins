@@ -1,6 +1,7 @@
 """Tests for the flight_search plugin.
 
 All Amadeus API calls are mocked.
+The plugin uses the PluginCapabilities gateway — tests provide a mock caps object.
 """
 from __future__ import annotations
 
@@ -23,11 +24,23 @@ from flight_search import plugin  # noqa: E402
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture()
+def mock_caps():
+    """Create a mock PluginCapabilities instance."""
+    caps = MagicMock()
+    caps.get_config.return_value = None
+    caps.get_user_id.return_value = "test-user"
+    return caps
+
+
 @pytest.fixture(autouse=True)
-def _clear_token_cache():
-    """Reset the token cache between tests."""
+def _register_and_clear(mock_caps):
+    """Register mock caps and reset token cache between tests."""
+    plugin.register(mock_caps)
     plugin._TOKEN_CACHE["token"] = ""
     plugin._TOKEN_CACHE["expires_at"] = 0.0
+    yield
+    plugin._caps = None
 
 
 # ---------------------------------------------------------------------------
@@ -189,20 +202,15 @@ class TestNoResults:
 # ---------------------------------------------------------------------------
 
 class TestApiErrors:
-    def test_missing_credentials(self, monkeypatch):
-        monkeypatch.delenv("AMADEUS_API_KEY", raising=False)
-        monkeypatch.delenv("AMADEUS_API_SECRET", raising=False)
-        # Also ensure Prax settings fallback is empty.
-        mock_settings = MagicMock()
-        mock_settings.amadeus_api_key = ""
-        mock_settings.amadeus_api_secret = ""
-        with patch.dict(sys.modules, {"prax.settings": MagicMock(settings=mock_settings)}):
-            result = plugin.flight_search.invoke({
-                "origin": "JFK",
-                "destination": "CDG",
-                "departure_date": "2026-03-15",
-            })
-            assert "credentials" in result.lower() or "failed" in result.lower()
+    def test_missing_credentials(self, mock_caps):
+        """Caps returns empty strings for credential config keys."""
+        mock_caps.get_config.return_value = ""
+        result = plugin.flight_search.invoke({
+            "origin": "JFK",
+            "destination": "CDG",
+            "departure_date": "2026-03-15",
+        })
+        assert "credentials" in result.lower() or "failed" in result.lower()
 
     def test_api_failure_returns_error(self):
         with patch.object(plugin, "_search_flights", side_effect=Exception("API down")):
@@ -237,16 +245,55 @@ class TestAirportLookup:
 
 
 # ---------------------------------------------------------------------------
+# Capabilities gateway tests
+# ---------------------------------------------------------------------------
+
+class TestCapabilitiesUsage:
+    def test_get_token_uses_caps_http_post(self, mock_caps):
+        """Token refresh should go through caps.http_post, not raw requests."""
+        mock_caps.get_config.side_effect = lambda k: {
+            "amadeus_id": "test-id", "amadeus_auth": "test-secret",
+        }.get(k, "")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"access_token": "tok123", "expires_in": 1799}
+        mock_resp.raise_for_status = MagicMock()
+        mock_caps.http_post.return_value = mock_resp
+
+        token = plugin._get_token()
+        assert token == "tok123"
+        mock_caps.http_post.assert_called_once()
+
+    def test_search_flights_uses_caps_http_get(self, mock_caps):
+        """Flight search should go through caps.http_get."""
+        # Pre-set a valid token.
+        import time
+        plugin._TOKEN_CACHE["token"] = "cached-token"
+        plugin._TOKEN_CACHE["expires_at"] = time.time() + 600
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_caps.http_get.return_value = mock_resp
+
+        plugin._search_flights("JFK", "CDG", "2026-03-15")
+        mock_caps.http_get.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Registration tests
 # ---------------------------------------------------------------------------
 
 class TestRegistration:
-    def test_register_returns_tools(self):
-        tools = plugin.register()
+    def test_register_returns_tools(self, mock_caps):
+        tools = plugin.register(mock_caps)
         assert len(tools) == 2
         names = {t.name for t in tools}
         assert "flight_search" in names
         assert "airport_lookup" in names
 
+    def test_register_sets_caps(self, mock_caps):
+        plugin.register(mock_caps)
+        assert plugin._caps is mock_caps
+
     def test_plugin_version(self):
-        assert plugin.PLUGIN_VERSION == "1"
+        assert plugin.PLUGIN_VERSION == "2"

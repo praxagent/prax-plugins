@@ -6,8 +6,8 @@ Plugin collection for [Prax](https://github.com/praxagent/prax). Each subfolder 
 
 | Plugin | Version | Description |
 |--------|---------|-------------|
-| [`pdf2presentation`](pdf2presentation/) | 4 | PDF → narrated video presentation (Beamer + TTS + ffmpeg) |
-| [`flight_search`](flight_search/) | 1 | Search for the cheapest flights between airports (Amadeus API) |
+| [`pdf2presentation`](pdf2presentation/) | 5 | PDF → narrated video presentation (Beamer + TTS + ffmpeg) |
+| [`flight_search`](flight_search/) | 2 | Search for the cheapest flights between airports (Amadeus API) |
 
 ## Installing plugins
 
@@ -36,6 +36,53 @@ cd /path/to/prax/workspaces/<your-user-id>/plugins/shared/
 git submodule add https://github.com/praxagent/prax-plugins.git prax-plugins
 ```
 
+## Versioning plugins
+
+Every plugin declares its version as a string constant at the top of `plugin.py`:
+
+```python
+PLUGIN_VERSION = "2"
+```
+
+Prax reads this constant (via regex, without importing) to track which version is active, display it in the UI and catalog, and decide when to back up the previous version for rollback.
+
+### When to bump the version
+
+Bump `PLUGIN_VERSION` in every commit that changes user-facing behavior:
+
+| Change | Action |
+|--------|--------|
+| New tool added or removed | Bump version |
+| Tool arguments or return format changed | Bump version |
+| Bug fix that changes output | Bump version |
+| Internal refactor, no behavior change | Optional — bump if you want it visible |
+| Docs-only change (Skills.md, comments) | Don't bump |
+
+The version is a free-form string. Use whatever scheme you prefer — `"2"`, `"2.1"`, `"2024.03"`. Prax compares versions as opaque strings (old != new = version changed), it does not interpret semver.
+
+### What Prax does when the version changes
+
+When Prax loads a plugin whose `PLUGIN_VERSION` differs from what the registry recorded:
+
+1. **Backs up** the previous `plugin.py` as `plugin.py.prev`
+2. **Records** the new version in `registry.json` (`active_version`), saving the old one as `previous_version`
+3. **Resets** the failure counter to 0
+4. **Regenerates** the plugin catalog
+5. **Rebuilds** the agent tool graph so the LLM sees the updated tools immediately
+
+### Rollback
+
+If a plugin tool fails 3 times consecutively, Prax automatically rolls back:
+
+1. Restores `plugin.py.prev` over the current `plugin.py`
+2. Swaps `active_version` and `previous_version` in the registry
+3. Sets status to `rolled_back`
+4. Reloads the tool graph
+
+You can also trigger a manual rollback:
+
+> "Roll back the pdf2presentation plugin"
+
 ## Updating plugins
 
 Once installed, ask Prax to pull the latest version:
@@ -46,18 +93,24 @@ or more specifically:
 
 > "Update the pdf2presentation plugin"
 
+Or use the Plugins panel in the TeamWork settings UI — click the refresh icon on any plugin.
+
+### What happens during an update
+
 Prax runs `plugin_import_update("prax-plugins")` under the hood, which:
 
-1. Pulls the latest commit from this repo via `git submodule update --remote --merge`
-2. Re-scans the updated code for security warnings
-3. If clean, hot-reloads the plugin tools immediately — no restart needed
-4. If new security concerns are found, shows them and waits for your confirmation
+1. **Pulls** the latest commit via `git submodule update --remote --merge`
+2. **Compares** the old and new git commit hashes — if identical, returns `"up_to_date"` and stops
+3. **Re-scans** the updated code for security warnings (AST + regex)
+4. **If clean** — hot-reloads the plugin tools immediately, no restart needed. The new `PLUGIN_VERSION` (if changed) is picked up automatically and recorded in the registry
+5. **If warnings are found** — the plugin stays **deactivated** until you explicitly acknowledge the warnings (via chat or the UI)
+6. **Commits** the submodule pointer update to the workspace git repo
 
-You can also check the current plugin version at any time:
+### Checking status
 
 > "What version of the pdf2presentation plugin am I running?"
 
-Prax will call `plugin_status("prax-plugins")` and show the active version, health status, and failure count.
+Prax calls `plugin_status("prax-plugins")` and shows the active version, previous version, health status, and consecutive failure count.
 
 ### Checking for updates manually
 
@@ -144,24 +197,19 @@ sudo apt install texlive-latex-base texlive-latex-recommended \
 sudo pacman -S texlive-basic poppler ffmpeg
 ```
 
-**API keys** (in Prax's `.env`):
+**API keys** — handled by the framework via the capabilities gateway.
+The plugin never sees raw API keys. Ensure `OPENAI_KEY` (or `ELEVENLABS_API_KEY`)
+is set in Prax's `.env`.
 
-| Key | Required for |
-|-----|-------------|
-| `OPENAI_KEY` | LLM (slide generation) + TTS (default) |
-| `ELEVENLABS_API_KEY` | TTS (if you prefer ElevenLabs) |
+**Optional TTS configuration** (in Prax settings):
 
-**Optional TTS configuration:**
+| Config key | Values | Default |
+|------------|--------|---------|
+| `presentation_tts_provider` | `openai`, `elevenlabs` | `openai` |
+| `presentation_tts_voice` | Any voice name for the provider | `nova` (OpenAI), `Rachel` (ElevenLabs) |
 
-```bash
-# TTS provider: "openai" (default) or "elevenlabs"
-PRESENTATION_TTS_PROVIDER=openai
-
-# Voice name — depends on provider
-# OpenAI voices: alloy, echo, fable, onyx, nova, shimmer
-# ElevenLabs: use any voice name from your account
-PRESENTATION_TTS_VOICE=nova
-```
+The plugin reads these via `caps.get_config()`. TTS synthesis is routed
+through `caps.tts_synthesize()` which injects credentials internally.
 
 ### Usage
 
@@ -246,14 +294,18 @@ Search for the cheapest flights between airports using the Amadeus Flight Offers
 
 ### Requirements
 
-**API keys** (in Prax's `.env`):
+**API credentials** (in Prax's `.env` or settings):
 
-| Key | Required for |
-|-----|-------------|
-| `AMADEUS_API_KEY` | Flight search API authentication |
-| `AMADEUS_API_SECRET` | Flight search API authentication |
+| Config key | Required for |
+|------------|-------------|
+| `amadeus_id` | Amadeus client ID |
+| `amadeus_auth` | Amadeus client secret |
 
 Sign up free at https://developers.amadeus.com/
+
+> **Note:** These config keys use non-secret names (`amadeus_id`/`amadeus_auth`)
+> so they can pass through the capabilities gateway's secret filter. The plugin
+> reads them via `caps.get_config()` and never sees raw API keys.
 
 ### Usage
 
@@ -273,7 +325,8 @@ Prax will use `airport_lookup` automatically when you say a city name instead of
 
 ### 1. Create a folder with `plugin.py`
 
-Every Prax plugin needs a `plugin.py` with three things:
+Every Prax plugin needs a `plugin.py` with a `register(caps)` function that
+receives a `PluginCapabilities` instance:
 
 ```python
 PLUGIN_VERSION = "1"
@@ -281,13 +334,28 @@ PLUGIN_DESCRIPTION = "What this plugin does"
 
 from langchain_core.tools import tool
 
+_caps = None
+
 @tool
 def my_tool(arg: str) -> str:
     """Description shown to the LLM agent."""
+    # Use caps for all credentialed operations:
+    # _caps.build_llm()          — get an LLM (plugin never sees API key)
+    # _caps.http_get(url)        — audited HTTP request
+    # _caps.run_command([...])   — run a shell command
+    # _caps.save_file(name, b)   — save to workspace
+    # _caps.get_config(key)      — read non-secret config
+    # _caps.tts_synthesize(...)  — text-to-speech
+    # _caps.shared_tempdir()     — create a temp directory
     return "result"
 
-def register():
-    """Return the tools this plugin provides."""
+def register(caps):
+    """Return the tools this plugin provides.
+
+    Receives a PluginCapabilities instance for credentialed operations.
+    """
+    global _caps
+    _caps = caps
     return [my_tool]
 ```
 
@@ -301,12 +369,33 @@ Tell Prax: `"Import this plugin: https://github.com/you/my-plugin"`
 
 ### Plugin conventions
 
-- **`PLUGIN_VERSION`** — string, increment when you update
+- **`PLUGIN_VERSION`** — string, bump on every user-facing change (see [Versioning plugins](#versioning-plugins))
 - **`PLUGIN_DESCRIPTION`** — one-line summary for the catalog
-- **`register()`** — must return a list of `@tool` decorated functions
+- **`register(caps)`** — receives a `PluginCapabilities` instance, returns a list of `@tool` decorated functions
+- **Use `caps.*` methods** — never import `os.environ`, `prax.settings`, or API keys directly
 - **Deferred imports** — import heavy dependencies inside your tool functions, not at module level
 - **Error messages** — return user-friendly strings, don't raise exceptions from tools
-- **System deps** — check for them at runtime and return install instructions if missing
+- **System deps** — check for them at runtime via `caps.run_command(["which", ...])` and return install instructions if missing
+
+### Capabilities gateway
+
+The `PluginCapabilities` object (`caps`) is the official SDK for plugins to access Prax services. Plugins never touch API keys, environment variables, or settings directly — the gateway handles credentials internally.
+
+| Method | Description |
+|--------|-------------|
+| `caps.build_llm(tier="medium")` | Get a LangChain LLM — plugin never sees API key |
+| `caps.http_get(url, **kw)` | Audited, rate-limited HTTP GET |
+| `caps.http_post(url, **kw)` | Audited, rate-limited HTTP POST |
+| `caps.run_command(cmd, timeout=30)` | Run a shell command (audited, time-limited) |
+| `caps.save_file(filename, content)` | Save bytes to the plugin's workspace directory |
+| `caps.read_file(filename)` | Read a text file from the plugin's workspace directory |
+| `caps.workspace_path(*parts)` | Get an absolute path within the plugin's scoped directory |
+| `caps.get_config(key)` | Read a non-secret setting (blocks keys matching `key`, `secret`, `token`, `password`, `credential`) |
+| `caps.tts_synthesize(text, path, voice, provider)` | Text-to-speech — framework injects API key |
+| `caps.shared_tempdir(prefix)` | Create a temporary directory |
+| `caps.get_user_id()` | Get the current user's ID |
+
+**Plugin-owned credentials:** If your plugin needs its own API credentials (e.g., Amadeus for flight search), use config key names that don't match the secret patterns. For example, use `amadeus_id` / `amadeus_auth` instead of `amadeus_api_key` / `amadeus_api_secret`.
 
 ### Security restrictions
 
@@ -314,28 +403,19 @@ Prax applies multiple security layers when importing plugins. Your plugin will b
 
 | Restriction | Details |
 |-------------|---------|
-| **No `subprocess`, `os.system`, `os.popen`** | Detected by AST analysis. Use Prax's sandbox tools instead. |
+| **No `subprocess`, `os.system`, `os.popen`** | Detected by AST analysis. Use `caps.run_command()` instead. |
 | **No `eval`, `exec`, `compile`, `__import__`** | Dynamic code execution is blocked. |
-| **No `os.environ` access** | Plugins cannot read environment variables (API keys, secrets). Use `prax.settings` for configuration. |
-| **No raw `socket` usage** | Use `requests` (flagged but shown to user) or Prax's `fetch_url_content` tool. |
-| **No built-in tool name collisions** | Your tools cannot share names with Prax's ~100+ built-in tools. Attempting to register `browser_read_page` or `get_current_datetime` will be rejected. |
+| **No `os.environ` access** | Plugins cannot read environment variables. Use `caps.get_config()`. |
+| **No raw `socket` usage** | Use `caps.http_get()` / `caps.http_post()`. |
+| **No direct `prax.settings` import** | Use `caps.get_config()` for non-secret values. |
+| **No built-in tool name collisions** | Your tools cannot share names with Prax's ~100+ built-in tools. |
 | **Sandbox test must pass** | Before activation, your plugin is imported in an isolated subprocess with a stripped environment (no API keys) and a 30-second timeout. |
 
 If security warnings are found, Prax shows them to the user and requires explicit confirmation before activating.
 
-**Risk classification:** Plugin tools are automatically classified as MEDIUM risk (external reads, state changes). If your tool performs side-effectful external actions (sending messages, HTTP POST, file deletion), consider using `@risk_tool(risk=RiskLevel.HIGH)` from `prax.agent.action_policy` instead of `@tool` — this adds a user confirmation gate.
+**Filesystem scoping:** IMPORTED plugins are confined to `plugin_data/{plugin_name}/` within the user's workspace. `caps.save_file()`, `caps.read_file()`, and `caps.workspace_path()` are automatically scoped. Path traversal attempts (e.g., `../`) are blocked.
 
-### Accessing Prax services
-
-Plugins run inside Prax, so you can import its services:
-
-```python
-from prax.services.pdf_service import process_pdf_url   # PDF extraction
-from prax.agent.user_context import current_user_id      # Current user
-from prax.services.workspace_service import save_file     # Workspace files
-from prax.agent.llm_factory import build_llm              # LLM
-from prax.settings import settings                        # Settings (NOT os.environ)
-```
+**Risk classification:** Plugin tools are automatically classified as HIGH risk for IMPORTED plugins (require user confirmation). BUILTIN and WORKSPACE plugin tools default to MEDIUM risk.
 
 ---
 

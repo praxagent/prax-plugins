@@ -3,60 +3,38 @@
 Converts a PDF document into a narrated Beamer presentation video.
 
 Pipeline:
-  PDF → Markdown text (opendataloader-pdf)
+  PDF → Markdown text
       → Beamer LaTeX + speaker notes (LLM)
       → Slide images (pdflatex + pdftoppm)
-      → Audio narration per slide (OpenAI TTS or ElevenLabs)
+      → Audio narration per slide (TTS via capabilities gateway)
       → Slide videos (ffmpeg: image + audio)
       → Final concatenated video (ffmpeg)
 
 System requirements: pdflatex, pdftoppm (poppler-utils), ffmpeg
-TTS providers: OpenAI (default) or ElevenLabs — see README for .env config.
 
-In Docker-compose deployments, system commands are automatically routed to
-the always-on sandbox container via ``prax.utils.shell``.  No user
-intervention needed — the sandbox has all required packages pre-installed.
+Configure TTS in your Prax settings:
+    presentation_tts_provider=openai   (or "elevenlabs")
+    presentation_tts_voice=nova        (or any voice name)
+
+This plugin uses the PluginCapabilities gateway — it never directly
+accesses os.environ, prax.settings, or API keys.
 """
 from __future__ import annotations
 
-PLUGIN_VERSION = "4"
+PLUGIN_VERSION = "5"
 PLUGIN_DESCRIPTION = "Convert a PDF into a narrated video presentation"
 
 import json
 import logging
 import os
 import re
-import subprocess
-import tempfile
 
 from langchain_core.tools import tool
 
-# Sandbox-aware command execution.  When running inside Docker-compose,
-# commands are routed to the sandbox container automatically.  Falls back
-# to raw subprocess for standalone / local use.
-try:
-    from prax.utils.shell import run_command, which as _which_cmd, shared_tempdir, to_sandbox_path
-except ImportError:
-    # Standalone fallback — no Prax framework available.
-    def run_command(cmd, **kw):  # type: ignore[misc]
-        kw.setdefault("capture_output", True)
-        kw.setdefault("text", True)
-        return subprocess.run(cmd, **kw)
-
-    def _which_cmd(name):  # type: ignore[misc]
-        try:
-            subprocess.run(["which", name], capture_output=True, check=True, timeout=5)
-            return True
-        except Exception:
-            return False
-
-    def shared_tempdir(prefix="prax_"):  # type: ignore[misc]
-        return tempfile.mkdtemp(prefix=prefix)
-
-    def to_sandbox_path(path):  # type: ignore[misc]
-        return path
-
 logger = logging.getLogger(__name__)
+
+# Module-level caps reference, set during register().
+_caps = None
 
 
 # ======================================================================
@@ -64,37 +42,35 @@ logger = logging.getLogger(__name__)
 # ======================================================================
 
 def _get_tts_config() -> dict:
-    """Read TTS configuration from environment variables.
+    """Read TTS configuration via the capabilities gateway.
 
-    Env vars:
-        PRESENTATION_TTS_PROVIDER  — "openai" (default) or "elevenlabs"
-        PRESENTATION_TTS_VOICE     — voice name (defaults: "nova" / "Rachel")
+    Config keys (non-secret, safe to read):
+        presentation_tts_provider  — "openai" (default) or "elevenlabs"
+        presentation_tts_voice     — voice name (defaults: "nova" / "Rachel")
     """
-    provider = os.environ.get("PRESENTATION_TTS_PROVIDER", "openai").lower()
+    provider = (_caps.get_config("presentation_tts_provider") if _caps else None) or "openai"
+    provider = provider.lower()
 
     if provider == "elevenlabs":
-        voice = os.environ.get("PRESENTATION_TTS_VOICE", "Rachel")
-        api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+        voice = (_caps.get_config("presentation_tts_voice") if _caps else None) or "Rachel"
     else:
         provider = "openai"
-        voice = os.environ.get("PRESENTATION_TTS_VOICE", "nova")
-        api_key = os.environ.get("OPENAI_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+        voice = (_caps.get_config("presentation_tts_voice") if _caps else None) or "nova"
 
-    return {"provider": provider, "voice": voice, "api_key": api_key}
+    return {"provider": provider, "voice": voice}
 
 
 def _check_system_deps(need_ffmpeg: bool = True) -> list[str]:
-    """Check which system dependencies are missing.
-
-    In Docker mode this checks the sandbox container, not the app container.
-    """
+    """Check which system dependencies are missing."""
     missing = []
     for cmd in ["pdflatex", "pdftoppm"]:
-        if not _which_cmd(cmd):
+        result = _caps.run_command(["which", cmd], timeout=5)
+        if result.returncode != 0:
             missing.append(cmd)
     if need_ffmpeg:
         for cmd in ["ffmpeg", "ffprobe"]:
-            if not _which_cmd(cmd):
+            result = _caps.run_command(["which", cmd], timeout=5)
+            if result.returncode != 0:
                 missing.append(cmd)
     return missing
 
@@ -105,14 +81,7 @@ def _check_system_deps(need_ffmpeg: bool = True) -> list[str]:
 
 def _extract_text_from_pdf(pdf_path: str) -> str:
     """Extract text from a local PDF file as markdown."""
-    # Prefer Prax's built-in PDF service (opendataloader-pdf → markdown).
-    try:
-        from prax.services.pdf_service import extract_markdown
-        return extract_markdown(pdf_path)
-    except Exception:
-        pass
-
-    # Fallback: pymupdf (fitz).
+    # Try pymupdf (fitz) — a library, no framework dependency.
     try:
         import fitz
         doc = fitz.open(pdf_path)
@@ -122,8 +91,8 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
     except ImportError:
         pass
 
-    # Fallback: pdftotext (poppler-utils).
-    result = run_command(
+    # Fallback: pdftotext (poppler-utils) via capabilities gateway.
+    result = _caps.run_command(
         ["pdftotext", "-layout", pdf_path, "-"],
         timeout=60,
     )
@@ -131,8 +100,8 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
         return result.stdout
 
     raise RuntimeError(
-        "Could not extract text from PDF. Install opendataloader-pdf, "
-        "pymupdf, or poppler-utils (pdftotext)."
+        "Could not extract text from PDF. Install pymupdf or "
+        "poppler-utils (pdftotext)."
     )
 
 
@@ -143,33 +112,18 @@ def _download_pdf(url: str, dest_dir: str) -> str:
     and magic bytes) so that HTML pages, error pages, etc. are rejected
     early with a clear error instead of crashing the PDF parser.
     """
-    # Prefer Prax's PDF service which handles arXiv URLs etc.
-    try:
-        from prax.services.pdf_service import download_pdf
-        path = download_pdf(url)
-        _validate_pdf(path, url)
-        return path
-    except ImportError:
-        pass
-
-    # Fallback: requests (preferred) or urllib.
     dest = os.path.join(dest_dir, "input.pdf")
-    try:
-        import requests as _req
-        resp = _req.get(url, timeout=60, allow_redirects=True)
-        resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "").lower()
-        if "html" in content_type:
-            raise ValueError(
-                f"URL returned HTML, not a PDF (Content-Type: {content_type}). "
-                f"If this is a web article, use fetch_url_content or web_summary_tool "
-                f"to extract the text first, then pass the text to pdf_to_slides."
-            )
-        with open(dest, "wb") as f:
-            f.write(resp.content)
-    except ImportError:
-        import urllib.request
-        urllib.request.urlretrieve(url, dest)
+    resp = _caps.http_get(url, timeout=60, allow_redirects=True)
+    resp.raise_for_status()
+    content_type = resp.headers.get("Content-Type", "").lower()
+    if "html" in content_type:
+        raise ValueError(
+            f"URL returned HTML, not a PDF (Content-Type: {content_type}). "
+            f"If this is a web article, use fetch_url_content or web_summary_tool "
+            f"to extract the text first, then pass the text to pdf_to_slides."
+        )
+    with open(dest, "wb") as f:
+        f.write(resp.content)
 
     _validate_pdf(dest, url)
     return dest
@@ -241,16 +195,7 @@ def _generate_beamer_and_notes(text: str, topic: str, style: str) -> dict:
         {"title": str, "latex": str,
          "slides": [{"title": str, "notes": str}, ...]}
     """
-    # Build the LLM — prefer Prax's factory, fall back to direct OpenAI.
-    try:
-        from prax.agent.llm_factory import build_llm
-        llm = build_llm()
-    except Exception:
-        from langchain_openai import ChatOpenAI
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            api_key=os.environ.get("OPENAI_KEY", ""),
-        )
+    llm = _caps.build_llm()
 
     topic_line = f"Topic/title: {topic}" if topic else ""
     prompt = _BEAMER_PROMPT.format(
@@ -291,14 +236,14 @@ def _compile_latex(latex_source: str, work_dir: str) -> str:
 
     # Run pdflatex twice (for TOC / frame numbers).
     for pass_num in range(2):
-        result = run_command(
+        result = _caps.run_command(
             [
                 "pdflatex",
                 "-interaction=nonstopmode",
                 "-output-directory", work_dir,
                 tex_path,
             ],
-            timeout=60, cwd=work_dir,
+            timeout=60,
         )
         if result.returncode != 0 and pass_num == 1:
             logger.warning("pdflatex stderr: %s", result.stderr[:500])
@@ -322,7 +267,7 @@ def _extract_slide_images(pdf_path: str, work_dir: str) -> list[str]:
     Returns a sorted list of image file paths.
     """
     prefix = os.path.join(work_dir, "slide")
-    result = run_command(
+    result = _caps.run_command(
         ["pdftoppm", "-png", "-r", "300", pdf_path, prefix],
         timeout=120,
     )
@@ -337,63 +282,21 @@ def _extract_slide_images(pdf_path: str, work_dir: str) -> list[str]:
 
 
 # ======================================================================
-# Step 5: TTS — text to speech
+# Step 5: TTS — text to speech via capabilities gateway
 # ======================================================================
 
-def _tts_openai(text: str, output_path: str, voice: str, api_key: str) -> None:
-    """Generate speech with OpenAI TTS-1."""
-    import openai
-    client = openai.OpenAI(api_key=api_key)
-    response = client.audio.speech.create(model="tts-1", voice=voice, input=text)
-    response.stream_to_file(output_path)
-
-
-def _tts_elevenlabs(text: str, output_path: str, voice: str, api_key: str) -> None:
-    """Generate speech with ElevenLabs."""
-    import requests
-
-    headers = {"xi-api-key": api_key}
-    # Resolve voice name → voice_id.
-    voices_resp = requests.get(
-        "https://api.elevenlabs.io/v1/voices", headers=headers, timeout=15,
-    )
-    voices_resp.raise_for_status()
-    voices = voices_resp.json().get("voices", [])
-    voice_id = None
-    for v in voices:
-        if v["name"].lower() == voice.lower():
-            voice_id = v["voice_id"]
-            break
-    if not voice_id:
-        if voices:
-            voice_id = voices[0]["voice_id"]
-            logger.warning("Voice '%s' not found, using '%s'", voice, voices[0]["name"])
-        else:
-            raise RuntimeError("No ElevenLabs voices available")
-
-    resp = requests.post(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-        headers={**headers, "Content-Type": "application/json"},
-        json={"text": text, "model_id": "eleven_monolingual_v1"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    with open(output_path, "wb") as f:
-        f.write(resp.content)
-
-
 def _generate_audio(text: str, output_path: str) -> None:
-    """Generate TTS audio using the configured provider."""
+    """Generate TTS audio using the capabilities gateway.
+
+    The framework handles API keys internally — the plugin never sees them.
+    """
     config = _get_tts_config()
-    if not config["api_key"]:
-        raise RuntimeError(
-            f"No API key for TTS provider '{config['provider']}'. "
-            f"Set {'ELEVENLABS_API_KEY' if config['provider'] == 'elevenlabs' else 'OPENAI_KEY'} in .env"
-        )
-    if config["provider"] == "elevenlabs":
-        _tts_elevenlabs(text, output_path, config["voice"], config["api_key"])
-    else:
-        _tts_openai(text, output_path, config["voice"], config["api_key"])
+    _caps.tts_synthesize(
+        text=text,
+        output_path=output_path,
+        voice=config["voice"],
+        provider=config["provider"],
+    )
 
 
 # ======================================================================
@@ -404,12 +307,7 @@ def _create_slide_video(
     image_path: str, audio_path: str, output_path: str
 ) -> None:
     """Create a video segment: still slide image + audio narration."""
-    # Use -shortest so the video duration is driven by the audio stream,
-    # avoiding A/V drift from manual duration calculation + AAC encoder delay.
-    # -af apad=pad_dur=1 adds 1s silence after speech for a natural pause
-    # between slides.  -fflags +shortest -max_interleave_delta 100M prevents
-    # ffmpeg from buffering the infinite image stream past the audio end.
-    result = run_command(
+    result = _caps.run_command(
         [
             "ffmpeg", "-y",
             "-loop", "1", "-i", image_path,
@@ -434,14 +332,11 @@ def _create_slide_video(
 def _concatenate_videos(video_paths: list[str], output_path: str) -> None:
     """Concatenate slide videos into one final presentation video."""
     concat_file = output_path + ".concat.txt"
-    # Translate paths for the sandbox — ffmpeg reads these from the concat
-    # file, so they must use sandbox-side paths, not app-container paths.
     with open(concat_file, "w") as f:
         for vp in video_paths:
-            sandbox_vp = to_sandbox_path(vp) or vp
-            f.write(f"file '{sandbox_vp}'\n")
+            f.write(f"file '{vp}'\n")
 
-    result = run_command(
+    result = _caps.run_command(
         [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -474,7 +369,8 @@ def pdf_to_presentation(
     The resulting video, slide PDF, and LaTeX source are saved to your
     workspace.  Use workspace_send_file to deliver the video.
 
-    Requires: pdflatex, pdftoppm (poppler-utils), ffmpeg, and a TTS API key.
+    Requires: pdflatex, pdftoppm (poppler-utils), ffmpeg, and a TTS API key
+    configured in Prax settings.
 
     Args:
         pdf_source: URL to a PDF, or a filename already in the workspace.
@@ -491,12 +387,7 @@ def pdf_to_presentation(
             f"  Ubuntu: apt install texlive-latex-base poppler-utils ffmpeg"
         )
 
-    tts_cfg = _get_tts_config()
-    if not tts_cfg["api_key"]:
-        key_var = "ELEVENLABS_API_KEY" if tts_cfg["provider"] == "elevenlabs" else "OPENAI_KEY"
-        return f"No TTS API key. Set {key_var} in .env (using provider: {tts_cfg['provider']})."
-
-    work_dir = shared_tempdir(prefix="prax_pres_")
+    work_dir = _caps.shared_tempdir(prefix="prax_pres_")
     try:
         return _run_pipeline(pdf_source, topic, style, work_dir)
     except Exception as e:
@@ -534,7 +425,7 @@ def pdf_to_slides(
             f"  Ubuntu: apt install texlive-latex-base poppler-utils"
         )
 
-    work_dir = shared_tempdir(prefix="prax_slides_")
+    work_dir = _caps.shared_tempdir(prefix="prax_slides_")
     try:
         return _run_slides_only(pdf_source, topic, style, work_dir)
     except Exception as e:
@@ -552,18 +443,14 @@ def _resolve_pdf(pdf_source: str, work_dir: str) -> str:
         logger.info("Downloading PDF from %s", pdf_source[:80])
         return _download_pdf(pdf_source, work_dir)
 
-    # Try workspace file.
-    try:
-        from prax.agent.user_context import current_user_id
-        uid = current_user_id.get()
-        if uid:
-            from prax.services.workspace_service import _workspace_root
-            root = _workspace_root(uid)
-            candidate = os.path.join(root, "active", pdf_source)
+    # Try workspace file via capabilities gateway.
+    if _caps.get_user_id():
+        try:
+            candidate = _caps.workspace_path(pdf_source)
             if os.path.isfile(candidate):
                 return candidate
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     # Try as absolute/relative path.
     if os.path.isfile(pdf_source):
@@ -573,20 +460,13 @@ def _resolve_pdf(pdf_source: str, work_dir: str) -> str:
 
 
 def _save_to_workspace(src_path: str, filename: str) -> str | None:
-    """Copy a file into the current user's active workspace. Returns dest or None."""
+    """Save a file to the workspace via the capabilities gateway."""
+    if not _caps or not _caps.get_user_id():
+        return None
     try:
-        from prax.agent.user_context import current_user_id
-        uid = current_user_id.get()
-        if uid:
-            from prax.services.workspace_service import save_file, save_binary
-
-            if filename.endswith((".tex", ".md", ".txt", ".json")):
-                with open(src_path, encoding="utf-8") as f:
-                    content = f.read()
-                save_file(uid, filename, content)
-            else:
-                save_binary(uid, filename, src_path)
-            return filename
+        with open(src_path, "rb") as f:
+            content = f.read()
+        return _caps.save_file(filename, content)
     except Exception:
         logger.debug("Could not save %s to workspace", filename, exc_info=True)
     return None
@@ -631,19 +511,8 @@ def _run_slides_only(
         f.write(notes_md)
     _save_to_workspace(notes_path, f"{safe_title}_notes.md")
 
-    # Copy the PDF to active workspace.
-    try:
-        from prax.agent.user_context import current_user_id
-        uid = current_user_id.get()
-        if uid:
-            import shutil
-            from prax.services.workspace_service import _ensure_workspace, _safe_join, _git_commit
-            root = _ensure_workspace(uid)
-            dest = _safe_join(root, "active", f"{safe_title}_slides.pdf")
-            shutil.copy2(slides_pdf, dest)
-            _git_commit(root, f"Generate slides: {title[:30]}")
-    except Exception:
-        pass
+    # Save the compiled slide PDF.
+    _save_to_workspace(slides_pdf, f"{safe_title}_slides.pdf")
 
     return (
         f"Slides generated: **{title}** ({len(data['slides'])} slides)\n\n"
@@ -735,18 +604,8 @@ def _run_pipeline(
         f.write(notes_md)
     _save_to_workspace(notes_path, f"{safe_title}_notes.md")
 
-    # Save video to workspace active/ (won't be git-committed due to .gitignore).
-    try:
-        from prax.agent.user_context import current_user_id
-        uid = current_user_id.get()
-        if uid:
-            import shutil
-            from prax.services.workspace_service import _ensure_workspace, _safe_join
-            root = _ensure_workspace(uid)
-            dest = _safe_join(root, "active", f"{safe_title}.mp4")
-            shutil.copy2(final_video, dest)
-    except Exception:
-        logger.debug("Could not copy video to workspace", exc_info=True)
+    # Save video to workspace.
+    _save_to_workspace(final_video, f"{safe_title}.mp4")
 
     # Recommend share link for videos (Discord has 8MB upload limit).
     if size_mb > 7:
@@ -760,10 +619,11 @@ def _run_pipeline(
             f"or `workspace_share_file('active/{safe_title}.mp4')` for a shareable link."
         )
 
+    tts_cfg = _get_tts_config()
     return (
         f"Presentation video created: **{title}**\n\n"
         f"- {num_slides} slides, {size_mb:.1f} MB\n"
-        f"- TTS: {_get_tts_config()['provider']} ({_get_tts_config()['voice']})\n\n"
+        f"- TTS: {tts_cfg['provider']} ({tts_cfg['voice']})\n\n"
         f"Saved to workspace:\n"
         f"- `{safe_title}.mp4` — narrated video presentation\n"
         f"- `{safe_title}_slides.tex` — LaTeX source\n"
@@ -776,6 +636,13 @@ def _run_pipeline(
 # Plugin registration
 # ======================================================================
 
-def register():
-    """Return the tools this plugin provides."""
+def register(caps):
+    """Return the tools this plugin provides.
+
+    Receives a PluginCapabilities instance for credentialed operations.
+    All HTTP calls, LLM access, TTS, and shell commands go through
+    caps — the plugin never touches API keys directly.
+    """
+    global _caps
+    _caps = caps
     return [pdf_to_presentation, pdf_to_slides]
