@@ -7,7 +7,8 @@ Plugin collection for [Prax](https://github.com/praxagent/prax). Each subfolder 
 | Plugin | Version | Description |
 |--------|---------|-------------|
 | [`pdf2presentation`](pdf2presentation/) | 5 | PDF → narrated video presentation (Beamer + TTS + ffmpeg) |
-| [`flight_search`](flight_search/) | 2 | Search for the cheapest flights between airports (Amadeus API) |
+| [`elevenmusic`](elevenmusic/) | 1 | Generate songs with ElevenLabs Music API |
+| [`radio`](radio/) | 1 | Stream audio files as an internet radio station |
 
 ## Installing plugins
 
@@ -281,43 +282,77 @@ Markdown text
 
 ---
 
-## flight_search
+## elevenmusic
 
-Search for the cheapest flights between airports using the Amadeus Flight Offers Search API (free test tier: 2,000 calls/month).
+Generate songs with the [ElevenLabs Music API](https://elevenlabs.io/docs/api-reference/music/create-music) and save them as MP3 to your workspace.
 
 ### Tools
 
 | Tool | Description |
 |------|-------------|
-| `flight_search` | Search for cheapest flights between two airports (one-way or round-trip) |
-| `airport_lookup` | Look up airport IATA codes by city name or partial code |
+| `generate_song` | Generate a song from a text prompt (MP3) |
 
 ### Requirements
 
-**API credentials** (in Prax's `.env` or settings):
+**API key** (in Prax's `.env`):
 
-| Config key | Required for |
-|------------|-------------|
-| `amadeus_id` | Amadeus client ID |
-| `amadeus_auth` | Amadeus client secret |
+```bash
+ELEVENLABS_API_KEY=your_key
+```
 
-Sign up free at https://developers.amadeus.com/
-
-> **Note:** These config keys use non-secret names (`amadeus_id`/`amadeus_auth`)
-> so they can pass through the capabilities gateway's secret filter. The plugin
-> reads them via `caps.get_config()` and never sees raw API keys.
+This plugin uses the [plugin permissions](#plugin-permissions) system — it declares `PLUGIN_PERMISSIONS` for `ELEVENLABS_API_KEY` and accesses it via `caps.get_approved_secret()`. IMPORTED plugins require explicit user approval.
 
 ### Usage
 
-Once installed, just talk to Prax:
+> "Generate a lo-fi hip hop beat for studying"
 
-> "Find the cheapest flights from JFK to Paris on March 15"
+> "Make a 2 minute jazz instrumental"
 
-> "Round-trip flights LAX to Tokyo, April 1–10, business class"
+> "Create a punk rock song about debugging at 3am"
 
-> "What's the airport code for Munich?"
+Parameters: `prompt` (required), `duration_seconds` (3–600, default 30), `instrumental` (default false).
 
-Prax will use `airport_lookup` automatically when you say a city name instead of an IATA code, then pass the code to `flight_search`. Results are sorted by price (cheapest first) and include airline, times, duration, stops, and cabin class.
+---
+
+## radio
+
+Stream a directory of audio files as an internet radio station. All listeners hear the same broadcast in real time.
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `start_radio` | Start streaming from a directory of audio files |
+| `stop_radio` | Stop the station and disconnect listeners |
+| `radio_status` | Check what's playing, listener count, and URL |
+| `radio_skip` | Skip to the next track |
+| `radio_queue` | Show upcoming tracks |
+
+### Requirements
+
+No API keys — just audio files in a directory. Supports MP3, OGG, WAV, FLAC, AAC, M4A.
+
+Optional: install [ngrok](https://ngrok.com/download) for public access (`expose_ngrok=True`).
+
+### Usage
+
+> "Start a radio station from my music folder"
+
+> "Start Prax Radio with shuffle on and expose it via ngrok"
+
+> "What's playing on the radio?"
+
+> "Skip this track"
+
+Listeners connect with any media player: `vlc http://localhost:PORT/stream`
+
+### HTTP endpoints
+
+| Endpoint | Returns |
+|----------|---------|
+| `/stream` | Audio stream (SHOUTcast-compatible) |
+| `/status` | JSON: current track, listeners, uptime |
+| `/playlist` | JSON: full playlist with position |
 
 ---
 
@@ -391,11 +426,45 @@ The `PluginCapabilities` object (`caps`) is the official SDK for plugins to acce
 | `caps.read_file(filename)` | Read a text file from the plugin's workspace directory |
 | `caps.workspace_path(*parts)` | Get an absolute path within the plugin's scoped directory |
 | `caps.get_config(key)` | Read a non-secret setting (blocks keys matching `key`, `secret`, `token`, `password`, `credential`) |
+| `caps.get_approved_secret(env_key)` | Read a pre-approved secret by env var name (see [Plugin permissions](#plugin-permissions)) |
 | `caps.tts_synthesize(text, path, voice, provider)` | Text-to-speech — framework injects API key |
 | `caps.shared_tempdir(prefix)` | Create a temporary directory |
 | `caps.get_user_id()` | Get the current user's ID |
 
-**Plugin-owned credentials:** If your plugin needs its own API credentials (e.g., Amadeus for flight search), use config key names that don't match the secret patterns. For example, use `amadeus_id` / `amadeus_auth` instead of `amadeus_api_key` / `amadeus_api_secret`.
+**Plugin-owned credentials (legacy):** If your plugin needs its own API credentials and you want to use `get_config()`, use config key names that don't match the secret patterns. For example, use `myservice_id` / `myservice_auth` instead of `myservice_api_key` / `myservice_api_secret`.
+
+**Plugin permissions (recommended):** For secrets that match the blocked patterns (e.g., `ELEVENLABS_API_KEY`), declare them in `PLUGIN_PERMISSIONS` and access them via `caps.get_approved_secret()`. See [Plugin permissions](#plugin-permissions) below.
+
+### Plugin permissions
+
+Plugins can declare that they need access to specific secrets (API keys, tokens, etc.) by setting a `PLUGIN_PERMISSIONS` constant:
+
+```python
+PLUGIN_PERMISSIONS = [
+    {
+        "key": "ELEVENLABS_API_KEY",
+        "reason": "Authenticate with the ElevenLabs API to generate music.",
+    },
+]
+```
+
+At load time, Prax reads the declaration and records it in the plugin registry. Access is gated by trust tier:
+
+| Tier | Behavior |
+|------|----------|
+| `builtin` | Always allowed — no approval needed |
+| `workspace` | Auto-approved at load time |
+| `imported` | Requires explicit user approval before the secret is accessible |
+
+To read an approved secret at runtime:
+
+```python
+api_key = caps.get_approved_secret("ELEVENLABS_API_KEY")
+```
+
+The secret value is read from `prax.settings` using the Pydantic field alias mapping (e.g., `ELEVENLABS_API_KEY` → `settings.elevenlabs_api_key`). The raw value is never stored in the registry — only the approval flag is persisted.
+
+Unapproved access raises `PermissionError` with a message telling the user to approve it in plugin settings.
 
 ### Security restrictions
 

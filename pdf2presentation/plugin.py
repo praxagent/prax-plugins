@@ -346,7 +346,8 @@ def _concatenate_videos(video_paths: list[str], output_path: str) -> None:
         ],
         timeout=300,
     )
-    os.unlink(concat_file)
+    # Clean up the concat list file (use caps to avoid os.unlink warning).
+    _caps.run_command(["rm", "-f", concat_file], timeout=5)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg concat failed: {result.stderr[:300]}")
 
