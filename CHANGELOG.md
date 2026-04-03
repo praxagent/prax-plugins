@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/praxagent/prax-plugins/compare/v0.1.0...v0.2.0) (2026-04-03)
+
+
+### Features
+
+* improve presentation plugin, make permissions super explicit ([c47ab84](https://github.com/praxagent/prax-plugins/commit/c47ab8442ba4a735f8a894822c650ab678a25ad4))
+
 ## 0.1.0 (2026-03-31)
 
 
