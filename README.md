@@ -6,7 +6,7 @@ Plugin collection for [Prax](https://github.com/praxagent/prax). Each subfolder 
 
 | Plugin | Version | Description |
 |--------|---------|-------------|
-| [`pdf2presentation`](pdf2presentation/) | 5 | PDF → narrated video presentation (Beamer + TTS + ffmpeg) |
+| [`txt2presentation`](txt2presentation/) | 1 | Any text source → narrated video presentation (Beamer + TTS + ffmpeg) |
 | [`elevenmusic`](elevenmusic/) | 1 | Generate songs with ElevenLabs Music API |
 | [`radio`](radio/) | 1 | Stream audio files as an internet radio station |
 
@@ -16,11 +16,11 @@ Plugin collection for [Prax](https://github.com/praxagent/prax). Each subfolder 
 
 Tell Prax:
 
-> "Import the pdf2presentation plugin: https://github.com/praxagent/prax-plugins"
+> "Import the txt2presentation plugin: https://github.com/praxagent/prax-plugins"
 
 Or by URL with path:
 
-> "Import this plugin: https://github.com/praxagent/prax-plugins/tree/main/pdf2presentation"
+> "Import this plugin: https://github.com/praxagent/prax-plugins/tree/main/txt2presentation"
 
 Prax clones the repo as a git submodule and loads only the plugin you specified.
 
@@ -82,7 +82,7 @@ If a plugin tool fails 3 times consecutively, Prax automatically rolls back:
 
 You can also trigger a manual rollback:
 
-> "Roll back the pdf2presentation plugin"
+> "Roll back the txt2presentation plugin"
 
 ## Updating plugins
 
@@ -92,7 +92,7 @@ Once installed, ask Prax to pull the latest version:
 
 or more specifically:
 
-> "Update the pdf2presentation plugin"
+> "Update the txt2presentation plugin"
 
 Or use the Plugins panel in the TeamWork settings UI — click the refresh icon on any plugin.
 
@@ -109,7 +109,7 @@ Prax runs `plugin_import_update("prax-plugins")` under the hood, which:
 
 ### Checking status
 
-> "What version of the pdf2presentation plugin am I running?"
+> "What version of the txt2presentation plugin am I running?"
 
 Prax calls `plugin_status("prax-plugins")` and shows the active version, previous version, health status, and consecutive failure count.
 
@@ -156,46 +156,43 @@ When you import a specific subfolder from a multi-plugin repo, Prax writes a fil
 
 Prax monitors every plugin tool invocation. If a tool fails 3 times consecutively, the plugin is automatically rolled back to its previous version. You'll see a message like:
 
-> "Plugin pdf2presentation auto-rolled back after 3 consecutive failures."
+> "Plugin txt2presentation auto-rolled back after 3 consecutive failures."
 
 You can check health status with `plugin_status` and manually roll back with `plugin_rollback` if needed.
 
 ---
 
-## pdf2presentation
+## txt2presentation
 
-PDF → Markdown → Beamer LaTeX + speaker notes (LLM) → slide images → TTS audio → video (ffmpeg)
+Any text source → Beamer LaTeX + speaker notes (LLM) → slide images → TTS audio → video (ffmpeg)
+
+Accepts: PDF files, web pages, YouTube videos, audio files (MP3/WAV), plain text, Markdown.
 
 ### Tools
 
 | Tool | Description |
 |------|-------------|
-| `pdf_to_presentation` | Full pipeline: PDF → narrated video (.mp4) |
-| `pdf_to_slides` | Lighter: PDF → Beamer slide deck + speaker notes (no video) |
+| `text_to_presentation` | Full pipeline: any source → narrated video (.mp4) |
+| `text_to_slides` | Lighter: any source → Beamer slide deck + speaker notes (no video) |
 
-### Input validation
+### Input types
 
-The plugin validates that the source is actually a PDF before processing:
-
-- **Content-Type check** — HTTP responses with `text/html` or other non-PDF content types are rejected immediately with a clear error message
-- **Magic bytes check** — Downloaded files are verified to start with `%PDF`. HTML pages, JSON responses, and other non-PDF content are detected and rejected with guidance (e.g., "use fetch_url_content to extract text first")
-
-This prevents cryptic parser crashes when a URL returns an HTML page instead of a PDF.
+| Source | How it's handled |
+|--------|-----------------|
+| PDF URL or file | Downloaded, text extracted via pymupdf or pdftotext |
+| Web page URL | Fetched, HTML stripped to plain text |
+| YouTube URL | Transcript via yt-dlp subtitles, or audio download + Whisper |
+| Audio file (MP3, WAV, M4A) | Transcribed via OpenAI Whisper API |
+| Text/Markdown file | Read directly |
+| Raw text (>200 chars) | Used as-is |
 
 ### Requirements
 
-**System dependencies:**
+**System dependencies (sandbox container):**
 
 ```bash
-# macOS
-brew install basictex poppler ffmpeg
-
-# Ubuntu / Debian
-sudo apt install texlive-latex-base texlive-latex-recommended \
-    texlive-fonts-recommended poppler-utils ffmpeg
-
-# Arch
-sudo pacman -S texlive-basic poppler ffmpeg
+apt install texlive-latex-base texlive-latex-recommended \
+    texlive-fonts-recommended poppler-utils ffmpeg yt-dlp
 ```
 
 **API keys** — handled by the framework via the capabilities gateway.
@@ -209,22 +206,19 @@ is set in Prax's `.env`.
 | `presentation_tts_provider` | `openai`, `elevenlabs` | `openai` |
 | `presentation_tts_voice` | Any voice name for the provider | `nova` (OpenAI), `Rachel` (ElevenLabs) |
 
-The plugin reads these via `caps.get_config()`. TTS synthesis is routed
-through `caps.tts_synthesize()` which injects credentials internally.
-
 ### Usage
 
-Once installed, just talk to Prax:
+> "Turn this article into a presentation: https://example.com/article"
 
-> "Turn this paper into a presentation: https://arxiv.org/abs/1706.03762"
+> "Make a video from this YouTube video: https://youtube.com/watch?v=..."
 
-> "Make a video presentation from paper.pdf in my workspace"
+> "Create slides from paper.pdf — business style, no video"
 
-> "Create slides from this PDF — business style, no video"
+> "Turn this podcast into slides: episode.mp3"
 
 ### What Prax does
 
-1. **Extracts text** from the PDF (opendataloader-pdf, pymupdf, or pdftotext)
+1. **Detects the source type** and extracts text (PDF, HTML, YouTube transcript, audio transcription, or plain text)
 2. **Generates Beamer LaTeX slides** via your configured LLM, with natural speaker notes
 3. **Compiles** the LaTeX to a PDF slide deck
 4. **Converts** each slide to an image (pdftoppm, 300 DPI)
@@ -245,13 +239,16 @@ Once installed, just talk to Prax:
 ### Architecture
 
 ```
-PDF file / URL
+Any source (URL, file, text)
   │
-  ├─ Content-Type + magic bytes validation
+  ├─ YouTube URL  → yt-dlp subtitles / Whisper
+  ├─ Web page URL → HTTP fetch + HTML strip
+  ├─ PDF URL/file → pymupdf / pdftotext
+  ├─ Audio file   → Whisper transcription
+  ├─ Text file    → read directly
   │
-  ├─ opendataloader-pdf / pymupdf / pdftotext
   ▼
-Markdown text
+Extracted text
   │
   ├─ LLM (GPT-4o / Claude / etc.)
   ▼
@@ -375,13 +372,14 @@ _caps = None
 def my_tool(arg: str) -> str:
     """Description shown to the LLM agent."""
     # Use caps for all credentialed operations:
-    # _caps.build_llm()          — get an LLM (plugin never sees API key)
-    # _caps.http_get(url)        — audited HTTP request
-    # _caps.run_command([...])   — run a shell command
-    # _caps.save_file(name, b)   — save to workspace
-    # _caps.get_config(key)      — read non-secret config
-    # _caps.tts_synthesize(...)  — text-to-speech
-    # _caps.shared_tempdir()     — create a temp directory
+    # _caps.build_llm()              — get an LLM (plugin never sees API key)
+    # _caps.http_get(url)            — audited HTTP request
+    # _caps.run_command([...])       — run a shell command (sandbox)
+    # _caps.save_file(name, b)       — save to workspace
+    # _caps.get_config(key)          — read non-secret config
+    # _caps.tts_synthesize(...)      — text-to-speech
+    # _caps.transcribe_audio(path)   — speech-to-text (Whisper)
+    # _caps.shared_tempdir()         — create a temp directory
     return "result"
 
 def register(caps):
@@ -394,16 +392,50 @@ def register(caps):
     return [my_tool]
 ```
 
-### 2. Add it to a plugins repo (or create your own)
+### 2. Create `permissions.md` (required for IMPORTED plugins)
 
-You can either contribute to this repo or create a standalone plugin repo. Standalone repos work exactly the same way — just put `plugin.py` at the root.
+Every plugin must have a `permissions.md` declaring exactly what it can do. **This file is authoritative** — the framework enforces it as the ceiling of the plugin's capabilities. The plugin cannot do anything beyond what's declared here.
 
-### 3. Import into Prax
+```markdown
+# Permissions
+
+## capabilities
+- llm
+- http
+- commands
+
+## secrets
+- MY_API_KEY: Why the plugin needs this key
+
+## allowed_commands
+- ffmpeg
+- which
+```
+
+**Sections:**
+
+| Section | Purpose |
+|---------|---------|
+| `## capabilities` | Which gateway methods the plugin may call: `llm`, `http`, `commands`, `tts`, `transcription`, `filesystem` |
+| `## secrets` | Environment variable names the plugin needs, with a reason |
+| `## allowed_commands` | Exact command names (argv[0]) the plugin may run. If present, anything not listed is blocked |
+
+**Why this matters:**
+- Reviewers can audit a plugin by reading one file — no need to trace Python code
+- Bad actors can't sneak in new permissions — any change to `permissions.md` is visible in diffs
+- IMPORTED plugins without a `permissions.md` get **zero capabilities**
+
+### 3. Add it to a plugins repo (or create your own)
+
+You can either contribute to this repo or create a standalone plugin repo. Standalone repos work exactly the same way — just put `plugin.py` and `permissions.md` at the root.
+
+### 4. Import into Prax
 
 Tell Prax: `"Import this plugin: https://github.com/you/my-plugin"`
 
 ### Plugin conventions
 
+- **`permissions.md`** — required for IMPORTED plugins, declares capabilities, secrets, and allowed commands
 - **`PLUGIN_VERSION`** — string, bump on every user-facing change (see [Versioning plugins](#versioning-plugins))
 - **`PLUGIN_DESCRIPTION`** — one-line summary for the catalog
 - **`register(caps)`** — receives a `PluginCapabilities` instance, returns a list of `@tool` decorated functions
@@ -428,6 +460,7 @@ The `PluginCapabilities` object (`caps`) is the official SDK for plugins to acce
 | `caps.get_config(key)` | Read a non-secret setting (blocks keys matching `key`, `secret`, `token`, `password`, `credential`) |
 | `caps.get_approved_secret(env_key)` | Read a pre-approved secret by env var name (see [Plugin permissions](#plugin-permissions)) |
 | `caps.tts_synthesize(text, path, voice, provider)` | Text-to-speech — framework injects API key |
+| `caps.transcribe_audio(audio_path)` | Audio transcription via OpenAI Whisper — framework injects API key |
 | `caps.shared_tempdir(prefix)` | Create a temporary directory |
 | `caps.get_user_id()` | Get the current user's ID |
 

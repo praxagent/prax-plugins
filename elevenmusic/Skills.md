@@ -9,7 +9,7 @@
 
 ## When NOT to use
 
-- User wants text-to-speech narration — use the TTS capabilities in pdf2presentation or the framework's `caps.tts_synthesize()`
+- User wants text-to-speech narration — use the TTS capabilities in txt2presentation or the framework's `caps.tts_synthesize()`
 - User wants to play/stream existing audio files — use the radio plugin instead
 - User wants to edit or remix an existing audio file — this plugin generates from scratch only
 - User wants sound effects, not music

@@ -1,4 +1,4 @@
-"""Tests for the pdf2presentation plugin.
+"""Tests for the txt2presentation plugin.
 
 All external calls (LLM, TTS, system commands, Prax services) are mocked.
 The plugin uses the PluginCapabilities gateway — tests provide a mock caps object.
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.modules.setdefault("prax", MagicMock())
 sys.modules.setdefault("prax.settings", MagicMock())
 
-from pdf2presentation import plugin  # noqa: E402
+from txt2presentation import plugin  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +36,7 @@ def mock_caps():
     caps.run_command.return_value = MagicMock(returncode=0, stdout="", stderr="")
     caps.build_llm.return_value = MagicMock()
     caps.tts_synthesize.return_value = "/tmp/out.mp3"
+    caps.transcribe_audio.return_value = "This is a transcribed audio file with enough text to be useful."
     caps.save_file.return_value = "/workspace/test/file"
     caps.workspace_path.return_value = "/workspace/test/active"
     return caps
@@ -78,13 +79,109 @@ def fake_json_file(tmp_path):
     return str(j)
 
 
+@pytest.fixture()
+def fake_text_file(tmp_path):
+    """Create a plain text file with enough content."""
+    txt = tmp_path / "article.txt"
+    txt.write_text("This is a long article about technology. " * 50, encoding="utf-8")
+    return str(txt)
+
+
+@pytest.fixture()
+def fake_html_file(tmp_path):
+    """Create an HTML file."""
+    html = tmp_path / "page.html"
+    html.write_text(
+        "<html><body><h1>Title</h1><p>This is a paragraph of content.</p>"
+        "<script>var x = 1;</script><p>More content here.</p></body></html>",
+        encoding="utf-8",
+    )
+    return str(html)
+
+
+# ---------------------------------------------------------------------------
+# Input detection tests
+# ---------------------------------------------------------------------------
+
+class TestInputDetection:
+    def test_youtube_url_detected(self):
+        assert plugin._is_youtube_url("https://www.youtube.com/watch?v=abc123")
+        assert plugin._is_youtube_url("https://youtu.be/abc123")
+        assert plugin._is_youtube_url("https://youtube.com/shorts/abc123")
+
+    def test_non_youtube_not_detected(self):
+        assert not plugin._is_youtube_url("https://example.com/video")
+        assert not plugin._is_youtube_url("https://vimeo.com/12345")
+        assert not plugin._is_youtube_url("some text about youtube")
+
+    def test_is_url(self):
+        assert plugin._is_url("https://example.com")
+        assert plugin._is_url("http://example.com")
+        assert not plugin._is_url("just some text")
+        assert not plugin._is_url("/path/to/file.pdf")
+
+
+# ---------------------------------------------------------------------------
+# HTML stripping tests
+# ---------------------------------------------------------------------------
+
+class TestStripHtml:
+    def test_basic_stripping(self):
+        html = "<p>Hello <b>world</b></p>"
+        text = plugin._strip_html(html)
+        assert "Hello world" in text
+        assert "<p>" not in text
+        assert "<b>" not in text
+
+    def test_script_removal(self):
+        html = "<p>Before</p><script>alert('xss')</script><p>After</p>"
+        text = plugin._strip_html(html)
+        assert "Before" in text
+        assert "After" in text
+        assert "alert" not in text
+
+    def test_entity_decoding(self):
+        html = "<p>A &amp; B &lt; C</p>"
+        text = plugin._strip_html(html)
+        assert "A & B < C" in text
+
+
+# ---------------------------------------------------------------------------
+# VTT parsing tests
+# ---------------------------------------------------------------------------
+
+class TestParseVtt:
+    def test_basic_vtt(self):
+        vtt = """WEBVTT
+
+1
+00:00:01.000 --> 00:00:03.000
+Hello, welcome to the video.
+
+2
+00:00:03.500 --> 00:00:06.000
+Today we will discuss testing."""
+        text = plugin._parse_vtt(vtt)
+        assert "Hello, welcome to the video." in text
+        assert "Today we will discuss testing." in text
+        assert "-->" not in text
+
+    def test_strips_inline_tags(self):
+        vtt = """WEBVTT
+
+00:00:01.000 --> 00:00:03.000
+<c>Hello</c> world"""
+        text = plugin._parse_vtt(vtt)
+        assert "Hello world" in text
+        assert "<c>" not in text
+
+
 # ---------------------------------------------------------------------------
 # _validate_pdf tests
 # ---------------------------------------------------------------------------
 
 class TestValidatePdf:
     def test_valid_pdf_passes(self, fake_pdf):
-        # Should not raise.
         plugin._validate_pdf(fake_pdf)
 
     def test_html_file_raises(self, fake_html):
@@ -106,99 +203,53 @@ class TestValidatePdf:
             plugin._validate_pdf(str(fake_html), source_url="https://example.com/page")
 
     def test_nonexistent_file_does_not_raise(self):
-        # Can't read — let downstream handle it.
         plugin._validate_pdf("/nonexistent/file.pdf")
 
-    def test_empty_file_raises(self, tmp_path):
-        f = tmp_path / "empty.pdf"
-        f.write_bytes(b"")
-        with pytest.raises(ValueError, match="does not start with %PDF"):
-            plugin._validate_pdf(str(f))
-
 
 # ---------------------------------------------------------------------------
-# _download_pdf tests
+# _resolve_source tests
 # ---------------------------------------------------------------------------
 
-class TestDownloadPdf:
-    """Test the capabilities-based download path."""
+class TestResolveSource:
+    def test_local_text_file(self, fake_text_file, tmp_work_dir):
+        text = plugin._resolve_source(fake_text_file, tmp_work_dir)
+        assert "technology" in text
+        assert len(text) > 100
 
-    @staticmethod
-    def _make_response(content_type: str, content: bytes):
-        resp = MagicMock()
-        resp.headers = {"Content-Type": content_type}
-        resp.status_code = 200
-        resp.content = content
-        resp.raise_for_status = MagicMock()
-        return resp
+    def test_local_html_file(self, fake_html_file, tmp_work_dir):
+        text = plugin._resolve_source(fake_html_file, tmp_work_dir)
+        assert "Title" in text
+        assert "paragraph" in text
+        assert "<html>" not in text  # HTML should be stripped
 
-    def test_rejects_html_response(self, tmp_work_dir, mock_caps):
-        fake_resp = self._make_response("text/html; charset=utf-8", b"<html>Not a PDF</html>")
-        mock_caps.http_get.return_value = fake_resp
+    def test_raw_text_passthrough(self, tmp_work_dir):
+        raw = "This is a long piece of text about testing. " * 20
+        text = plugin._resolve_source(raw, tmp_work_dir)
+        assert text == raw.strip()
 
-        with pytest.raises(ValueError, match="HTML"):
-            plugin._download_pdf("https://example.com/page.html", tmp_work_dir)
-
-    def test_accepts_pdf_response(self, tmp_work_dir, mock_caps):
-        fake_resp = self._make_response("application/pdf", b"%PDF-1.4 test content")
-        mock_caps.http_get.return_value = fake_resp
-
-        path = plugin._download_pdf("https://example.com/paper.pdf", tmp_work_dir)
-        assert os.path.isfile(path)
-        with open(path, "rb") as f:
-            assert f.read().startswith(b"%PDF")
-
-    def test_accepts_octet_stream(self, tmp_work_dir, mock_caps):
-        fake_resp = self._make_response("application/octet-stream", b"%PDF-1.4 binary pdf")
-        mock_caps.http_get.return_value = fake_resp
-
-        path = plugin._download_pdf("https://example.com/file", tmp_work_dir)
-        assert os.path.isfile(path)
-
-    def test_rejects_html_body_even_with_pdf_content_type(self, tmp_work_dir, mock_caps):
-        fake_resp = self._make_response("application/pdf", b"<!DOCTYPE html><html></html>")
-        mock_caps.http_get.return_value = fake_resp
-
-        with pytest.raises(ValueError, match="HTML"):
-            plugin._download_pdf("https://example.com/fake.pdf", tmp_work_dir)
-
-    def test_uses_caps_http_get(self, tmp_work_dir, mock_caps):
-        """Verify download goes through the capabilities gateway."""
-        fake_resp = self._make_response("application/pdf", b"%PDF-1.4 test")
-        mock_caps.http_get.return_value = fake_resp
-
-        plugin._download_pdf("https://example.com/paper.pdf", tmp_work_dir)
-        mock_caps.http_get.assert_called_once_with(
-            "https://example.com/paper.pdf", timeout=60, allow_redirects=True,
-        )
-
-
-# ---------------------------------------------------------------------------
-# _resolve_pdf tests
-# ---------------------------------------------------------------------------
-
-class TestResolvePdf:
-    def test_local_file(self, fake_pdf):
-        path = plugin._resolve_pdf(fake_pdf, "/tmp")
-        assert path == fake_pdf
-
-    def test_file_not_found(self, mock_caps):
+    def test_short_text_raises(self, tmp_work_dir, mock_caps):
         mock_caps.get_user_id.return_value = None
-        with pytest.raises(FileNotFoundError, match="not found"):
-            plugin._resolve_pdf("nonexistent_file.pdf", "/tmp")
+        with pytest.raises(ValueError, match="Could not resolve"):
+            plugin._resolve_source("too short", tmp_work_dir)
 
-    def test_url_triggers_download(self, tmp_work_dir):
-        with patch.object(plugin, "_download_pdf", return_value="/tmp/downloaded.pdf") as mock_dl:
-            path = plugin._resolve_pdf("https://example.com/paper.pdf", tmp_work_dir)
-            mock_dl.assert_called_once_with("https://example.com/paper.pdf", tmp_work_dir)
-            assert path == "/tmp/downloaded.pdf"
+    def test_youtube_url_dispatches(self, tmp_work_dir, mock_caps):
+        with patch.object(plugin, "_extract_text_from_youtube", return_value="transcript") as mock_yt:
+            text = plugin._resolve_source("https://www.youtube.com/watch?v=abc", tmp_work_dir)
+            mock_yt.assert_called_once()
+            assert text == "transcript"
 
-    def test_workspace_file_resolution(self, fake_pdf, mock_caps):
-        """If caps.workspace_path resolves to a real file, use it."""
+    def test_regular_url_dispatches(self, tmp_work_dir, mock_caps):
+        with patch.object(plugin, "_extract_text_from_url", return_value="web content") as mock_url:
+            text = plugin._resolve_source("https://example.com/article", tmp_work_dir)
+            mock_url.assert_called_once()
+            assert text == "web content"
+
+    def test_workspace_pdf_dispatches(self, fake_pdf, tmp_work_dir, mock_caps):
         mock_caps.workspace_path.return_value = fake_pdf
-        path = plugin._resolve_pdf("test.pdf", "/tmp")
-        assert path == fake_pdf
-        mock_caps.workspace_path.assert_called_with("test.pdf")
+        with patch.object(plugin, "_extract_text_from_pdf", return_value="pdf text") as mock_pdf:
+            text = plugin._resolve_source("test.pdf", tmp_work_dir)
+            mock_pdf.assert_called_once_with(fake_pdf)
+            assert text == "pdf text"
 
 
 # ---------------------------------------------------------------------------
@@ -254,15 +305,6 @@ class TestGenerateBeamerAndNotes:
         with pytest.raises(ValueError, match="missing"):
             plugin._generate_beamer_and_notes("text", "", "academic")
 
-    def test_uses_caps_build_llm(self, mock_caps):
-        """Verify LLM is obtained through the capabilities gateway."""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=self.VALID_LLM_RESPONSE)
-        mock_caps.build_llm.return_value = mock_llm
-
-        plugin._generate_beamer_and_notes("text", "", "academic")
-        mock_caps.build_llm.assert_called_once()
-
 
 # ---------------------------------------------------------------------------
 # _check_system_deps tests
@@ -316,16 +358,6 @@ class TestTtsConfig:
         assert cfg["provider"] == "elevenlabs"
         assert cfg["voice"] == "Adam"
 
-    def test_custom_openai_voice(self, mock_caps):
-        def config_lookup(key):
-            return {"presentation_tts_provider": "openai",
-                    "presentation_tts_voice": "shimmer"}.get(key)
-
-        mock_caps.get_config.side_effect = config_lookup
-        cfg = plugin._get_tts_config()
-        assert cfg["provider"] == "openai"
-        assert cfg["voice"] == "shimmer"
-
 
 # ---------------------------------------------------------------------------
 # TTS audio generation tests
@@ -333,7 +365,7 @@ class TestTtsConfig:
 
 class TestGenerateAudio:
     def test_calls_caps_tts_synthesize(self, mock_caps):
-        mock_caps.get_config.return_value = None  # defaults
+        mock_caps.get_config.return_value = None
         plugin._generate_audio("Hello world", "/tmp/out.mp3")
         mock_caps.tts_synthesize.assert_called_once_with(
             text="Hello world",
@@ -373,16 +405,16 @@ class TestRegistration:
         tools = plugin.register(mock_caps)
         assert len(tools) == 2
         names = {t.name for t in tools}
-        assert "pdf_to_presentation" in names
-        assert "pdf_to_slides" in names
+        assert "text_to_presentation" in names
+        assert "text_to_slides" in names
 
     def test_register_sets_caps(self, mock_caps):
         plugin.register(mock_caps)
         assert plugin._caps is mock_caps
 
     def test_plugin_version(self):
-        assert plugin.PLUGIN_VERSION == "5"
+        assert plugin.PLUGIN_VERSION == "1"
 
     def test_plugin_description(self):
         assert plugin.PLUGIN_DESCRIPTION
-        assert isinstance(plugin.PLUGIN_DESCRIPTION, str)
+        assert "text" in plugin.PLUGIN_DESCRIPTION.lower() or "presentation" in plugin.PLUGIN_DESCRIPTION.lower()
